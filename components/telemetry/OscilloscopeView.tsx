@@ -27,6 +27,12 @@ import Animated, {
 import { Canvas, Fill, Path, Skia } from '@shopify/react-native-skia';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import {
+  type SuspensionBumpDiagResult,
+  type SuspensionSurfaceStatus,
+  useSuspensionBumpFsm,
+} from './useSuspensionBumpFsm';
+
 const BUFFER_LEN = 360;
 
 /**
@@ -214,6 +220,38 @@ type HudSnap = {
   peakVertZ: number;
 };
 
+function suspensionChipPresentation(surfaceStatus: SuspensionSurfaceStatus): {
+  chipBg: string;
+  chipBorder: string;
+  chipText: string;
+} {
+  switch (surfaceStatus) {
+    case 'HARSH_IMPACT':
+      return { chipBg: '#18080c', chipBorder: '#ff4d6d', chipText: '#ff8a9e' };
+    case 'UNDERDAMPED':
+      return { chipBg: '#181004', chipBorder: '#e8a035', chipText: '#ffd18a' };
+    case 'OVERDAMPED':
+      return { chipBg: '#060e18', chipBorder: '#4a8cff', chipText: '#9ec5ff' };
+    case 'GOOD':
+    default:
+      return { chipBg: '#06180e', chipBorder: '#2cff8a', chipText: '#8cffc4' };
+  }
+}
+
+function surfaceStatusLabel(surfaceStatus: SuspensionSurfaceStatus): string {
+  switch (surfaceStatus) {
+    case 'HARSH_IMPACT':
+      return 'HARSH IMPACT';
+    case 'UNDERDAMPED':
+      return 'UNDERDAMPED';
+    case 'OVERDAMPED':
+      return 'OVERDAMPED';
+    case 'GOOD':
+    default:
+      return 'GOOD';
+  }
+}
+
 export default function OscilloscopeView() {
   const { width: winW, height: winH } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -302,8 +340,17 @@ export default function OscilloscopeView() {
   const [calUiBanner, setCalUiBanner] = useState<string | null>(null);
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [dashLocked, setDashLocked] = useState(false);
+  const [bumpDiag, setBumpDiag] = useState<SuspensionBumpDiagResult | null>(null);
 
-  const hudFrame = useSharedValue(0);
+  const onBumpEventComplete = useCallback((result: SuspensionBumpDiagResult) => {
+    setBumpDiag(result);
+  }, []);
+
+  const { resetBumpFsm } = useSuspensionBumpFsm({
+    vertZ: cleanVertZSv,
+    hasCalib: hasCalibSv,
+    onBumpComplete: onBumpEventComplete,
+  });
 
   useLayoutEffect(() => {
     chartWsv.value = Math.max(winW, 120);
@@ -568,6 +615,8 @@ export default function OscilloscopeView() {
   /** Strict Vert Z for HUD: deadzone(cleanVertZ) — useDerivedValue keeps Skia/HUD on same signal. */
   const vertZHudDerived = useDerivedValue(() => displayWorldZG(cleanVertZSv.value));
 
+  const hudFrame = useSharedValue(0);
+
   const pushHud = useCallback((snap: HudSnap) => {
     setHud(snap);
   }, []);
@@ -732,8 +781,10 @@ export default function OscilloscopeView() {
       dspPhaseSv.value = 0;
     })();
     flashCalBanner();
+    resetBumpFsm();
+    setBumpDiag(null);
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
-  }, [flashCalBanner]);
+  }, [flashCalBanner, resetBumpFsm]);
 
   const resetPeakMax = useCallback(() => {
     runOnUI(() => {
@@ -877,6 +928,11 @@ export default function OscilloscopeView() {
           </View>
 
           <View style={styles.hudSection}>
+            <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Suspension · bump</Text>
+            <SuspensionBumpDiagCard diag={bumpDiag} mono={mono} />
+          </View>
+
+          <View style={styles.hudSection}>
             <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Peak · max</Text>
             <View style={styles.hudMetricRow}>
               <HudMetricTile label="Roll left" value={hud.peakRollLeft.toFixed(1)} suffix="°" mono={mono} />
@@ -939,6 +995,54 @@ export default function OscilloscopeView() {
           </Pressable>
         </View>
       </View>
+    </View>
+  );
+}
+
+function SuspensionBumpDiagCard({
+  diag,
+  mono,
+}: {
+  diag: SuspensionBumpDiagResult | null;
+  mono: string;
+}) {
+  if (!diag) {
+    return (
+      <View style={styles.bumpDiagCard}>
+        <Text style={[styles.bumpDiagPlaceholder, { fontFamily: mono }]}>
+          Hit a bump above 0.8 g (after CAL); tuning advice appears when the trace settles (±0.15 g for 150 ms).
+        </Text>
+      </View>
+    );
+  }
+
+  const ss = suspensionChipPresentation(diag.surfaceStatus);
+  return (
+    <View style={styles.bumpDiagCard}>
+      <View style={styles.bumpDiagHeadRow}>
+        <View style={[styles.bumpStatusChip, { borderColor: ss.chipBorder, backgroundColor: ss.chipBg }]}>
+          <Text style={[styles.bumpStatusChipTxt, { fontFamily: mono, color: ss.chipText }]}>
+            {surfaceStatusLabel(diag.surfaceStatus)}
+          </Text>
+        </View>
+        <Text style={[styles.bumpPeakInline, { fontFamily: mono }]}>
+          Peak {diag.maxPeakZG.toFixed(2)}{' '}
+          <Text style={[styles.metricTileSuf, { fontFamily: mono }]}>g</Text>
+        </Text>
+      </View>
+
+      <Text style={[styles.bumpAdviceLine, { fontFamily: mono }]}>
+        <Text style={styles.bumpAdviceLbl}>Compression · </Text>
+        {diag.compressionAdvice}
+      </Text>
+      <Text style={[styles.bumpAdviceLine, { fontFamily: mono }]}>
+        <Text style={styles.bumpAdviceLbl}>Rebound · </Text>
+        {diag.reboundAdvice}
+      </Text>
+
+      <Text style={[styles.bumpDiagMeta, { fontFamily: mono }]}>
+        Bounces {diag.bounceCount} · Settling {diag.settlingDurationMs.toFixed(0)} ms
+      </Text>
     </View>
   );
 }
@@ -1021,6 +1125,66 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'stretch',
     gap: 10,
+  },
+  bumpDiagCard: {
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 11,
+    backgroundColor: '#060a08',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#243028',
+    gap: 10,
+    shadowColor: '#102218',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.85,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  bumpDiagPlaceholder: {
+    color: '#5f7d6c',
+    fontSize: 11,
+    lineHeight: 16,
+    letterSpacing: 0.4,
+  },
+  bumpDiagHeadRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  bumpStatusChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  bumpStatusChipTxt: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1.4,
+  },
+  bumpPeakInline: {
+    color: '#c4f5dc',
+    fontSize: 14,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  bumpAdviceLine: {
+    color: '#a8d4bf',
+    fontSize: 12,
+    lineHeight: 17,
+    letterSpacing: 0.2,
+  },
+  bumpAdviceLbl: {
+    color: '#6d8c7a',
+    fontWeight: '600',
+  },
+  bumpDiagMeta: {
+    color: '#5f7d6c',
+    fontSize: 10,
+    letterSpacing: 0.6,
+    marginTop: 2,
+    fontVariant: ['tabular-nums'],
   },
   metricTile: {
     flexGrow: 1,
