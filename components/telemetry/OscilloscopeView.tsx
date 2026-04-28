@@ -14,7 +14,7 @@ import {
   Text,
   useWindowDimensions,
   View,
-  type LayoutChangeEvent,
+  type LayoutChangeEvent, ScrollView,
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
@@ -629,7 +629,7 @@ export default function OscilloscopeView() {
         ) : null}
       </View>
 
-      <View style={[styles.bottomPanel, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+      <ScrollView style={[styles.bottomPanel]}>
         <View style={styles.hudTopBar}>
           <View style={styles.logoCluster}>
             <Text style={[styles.logo, { fontFamily: mono }]}>LAUDA Performance</Text>
@@ -702,7 +702,6 @@ export default function OscilloscopeView() {
           </View>
 
           <View style={styles.hudSection}>
-            <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Peak · max</Text>
             <View style={styles.hudMetricRow}>
               <HudMetricTile label="Roll left" value={hud.peakRollLeft.toFixed(1)} suffix="°" mono={mono} />
               <HudMetricTile label="Roll right" value={hud.peakRollRight.toFixed(1)} suffix="°" mono={mono} />
@@ -729,28 +728,25 @@ export default function OscilloscopeView() {
         ) : null}
 
         <View style={styles.calRow}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Reset peak G and angle maximums to zero"
-            disabled={dashLocked || calUiBanner !== null}
-            onPress={resetPeakMax}
-            style={({ pressed }) => [
-              styles.resetMaxBtn,
-              (dashLocked || calUiBanner !== null) && styles.resetMaxBtnDisabled,
-              pressed && styles.resetMaxBtnPressed,
-            ]}
-          >
-            <Text style={[styles.resetMaxLabel, { fontFamily: mono }]}>RESET MAX</Text>
-          </Pressable>
-
-          <View style={styles.calRowRight}>
+            <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Reset peak G and angle maximums to zero"
+                disabled={dashLocked || calUiBanner !== null}
+                onPress={resetPeakMax}
+                style={({ pressed }) => [
+                  styles.resetMaxBtn,
+                  (dashLocked || calUiBanner !== null) && styles.resetMaxBtnDisabled,
+                  pressed && styles.resetMaxBtnPressed,
+                ]}
+            >
+              <Text style={[styles.resetMaxLabel, { fontFamily: mono }]}>RESET MAX</Text>
+            </Pressable>
             <GpsTrackLogger
-              speedKmH={speedKmH}
-              dspPeakVertZSv={dspPeakVertZSv}
-              dashLocked={dashLocked}
-              mono={mono}
+                speedKmH={speedKmH}
+                dspPeakVertZSv={dspPeakVertZSv}
+                dashLocked={dashLocked}
+                mono={mono}
             />
-
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Instant calibration: snap vertical axis to zero using current gravity. Long press to open filter settings."
@@ -766,8 +762,7 @@ export default function OscilloscopeView() {
               <Text style={[styles.calLabel, { fontFamily: mono }]}>CAL</Text>
             </Pressable>
           </View>
-        </View>
-      </View>
+      </ScrollView>
     </View>
   );
 }
@@ -867,7 +862,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   bottomPanel: {
-    flexShrink: 0,
+    flexShrink: 1,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#243028',
     paddingHorizontal: 16,
@@ -1030,20 +1025,15 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
   },
   calRow: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    width: '100%',
-    gap: 10,
     flexWrap: 'wrap',
-  },
-  calRowRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
+    paddingVertical: 12,
   },
   resetMaxBtn: {
-    paddingHorizontal: 14,
+    paddingHorizontal: 6,
     paddingVertical: 12,
     borderRadius: 8,
     borderWidth: 1,
