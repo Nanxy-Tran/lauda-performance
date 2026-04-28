@@ -7,9 +7,11 @@
     "icon": "./assets/images/icon.png",
     "scheme": "laudaperformance",
     "userInterfaceStyle": "automatic",
+    "jsEngine": "hermes",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.bwlauda.LaudaPerformance"
     },
     "android": {
       "adaptiveIcon": {
@@ -19,14 +21,29 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ],
+      "package": "com.bwlauda.LaudaPerformance"
     },
     "web": {
       "output": "static",
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
+      "expo-dev-client",
       "expo-router",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "LaudaPerformance uses your location for speed readouts during rides.",
+          "locationWhenInUsePermission": "LaudaPerformance uses your location for speed readouts during rides."
+        }
+      ],
       [
         "expo-splash-screen",
         {
