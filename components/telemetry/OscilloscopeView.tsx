@@ -4,7 +4,7 @@ import {
 } from 'expo-sensors';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Location from 'expo-location';
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import {
   Platform,
   Pressable,
@@ -28,17 +28,11 @@ import { Canvas, Fill, Path, Skia } from '@shopify/react-native-skia';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 const BUFFER_LEN = 360;
-const CAL_DURATION_MS = 5000;
-const STABILIZE_MS = 1000;
 
 /**
  * expo-sensors accelerometer (g): X lateral (right in portrait), Y longitudinal (toward top of device),
  * Z vertical (screen normal; ~+1 g screen-up on a table). Gyro uses the same axis pairing.
  */
-function expoAccelToBikeFrame(ax: number, ay: number, az: number) {
-  return { bx: ax, by: ay, bz: az };
-}
-
 function normalizeQuat(
   qw: number,
   qx: number,
@@ -126,13 +120,6 @@ function quatDerivative(
   return [dqw, dqx, dqy, dqz];
 }
 
-/** Chart EMA pole α ∈ [0.12, 0.15] — high smoothness (“buttery” trace). Slider scales within band. */
-function sliderToAlpha(slider01: number) {
-  'worklet';
-  const s = Math.min(Math.max(slider01, 0), 1);
-  return 0.12 + s * 0.03;
-}
-
 /** Stationary: trust gravity more (accel blend ↑). Matches (1−ALPHA)=~0.10 */
 const ACCEL_WEIGHT_STAT = 0.1;
 /** Dynamic: trust gyro predominantly. Matches (1−ALPHA)=~0.01 */
@@ -197,13 +184,12 @@ const PEAK_THRESHOLD_G = 0.15;
 /** Moving-average length for Peak-G (40ms @ ~100Hz-ish sampling ≈ 4 samples). */
 const PEAK_MA_SAMPLES = 4;
 
-/**
- * Slow EMA coefficient for tracking world-Z gravity / DC bias (sensor drift).
- * Only long-term creep; sudden bumps stay in the high-pass output.
- */
-const ALPHA_SLOW_DC = 0.002;
+/** Drift tracker: slow EMA on world raw Z (long-term DC / gravity creep). */
+const ALPHA_GRAVITY_DRIFT = 0.005;
+/** Engine / road noise fast LEMA on HP output (drift-free Z). */
+const VERT_FAST_ALPHA = 0.15;
 
-/** Clamp world linear Z after offset for display pipeline (OSC + HUD). */
+/** Clamp world linear Z after processing for display pipeline (OSC + HUD). */
 function displayWorldZG(zAfterOffsetG: number) {
   'worklet';
   const z = zAfterOffsetG;
@@ -249,13 +235,16 @@ export default function OscilloscopeView() {
   const qySv = useSharedValue(0);
   const qzSv = useSharedValue(0);
 
-  /** Dynamic gravity / DC estimate (world Z, g) — slow EMA of raw_Z; drift-free Z = raw − this. */
-  const currentGravityZSv = useSharedValue(1);
+  /** World-frame vertical accel Z (g) from rotated body accel — feeds DC blocker. */
+  const rawZSv = useSharedValue(1);
+  /** Slow low-pass: creeping gravity / sensor DC on Z (see ALPHA_GRAVITY_DRIFT). */
+  const gravityZSv = useSharedValue(1);
+  /** HP output: rawZ − gravityZ. */
+  const driftFreeZSv = useSharedValue(0);
+  /** Fast LPF on driftFreeZ — chart + Vert Z metric (see VERT_FAST_ALPHA). */
+  const cleanVertZSv = useSharedValue(0);
 
-  const z1Sv = useSharedValue(0);
-  const z2Sv = useSharedValue(0);
-
-  /** Legacy static Z bias (unused for display; kept 0 — vertical axis uses currentGravityZSv). */
+  /** Legacy static Z bias (unused). */
   const offsetZSv = useSharedValue(0);
 
   /** Attitude snapshot at calibration end for relative pitch / roll HUD. */
@@ -264,7 +253,7 @@ export default function OscilloscopeView() {
   const qCalY = useSharedValue(0);
   const qCalZ = useSharedValue(0);
 
-  /** 0 = acquire · plot + EMA, 1 = 5 s cal (no plot / no EMA), 2 = 1 s stabilize (EMA on, plot off). */
+  /** 0 = acquire (legacy; kept for shared-value shape). */
   const dspPhaseSv = useSharedValue(0);
   /** After first CAL, relative angles are trustworthy. */
   const hasCalibSv = useSharedValue(0);
@@ -314,11 +303,6 @@ export default function OscilloscopeView() {
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [dashLocked, setDashLocked] = useState(false);
 
-  const calibratingSamplingRef = useRef(false);
-  const calAccelSumRef = useRef({ sx: 0, sy: 0, sz: 0, n: 0 });
-  const calTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const stabTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const hudFrame = useSharedValue(0);
 
   useLayoutEffect(() => {
@@ -346,13 +330,6 @@ export default function OscilloscopeView() {
       rawAy.value = y;
       rawAz.value = z;
       sensorTs.value = timestamp && timestamp > 0 ? timestamp : performance.now() / 1000;
-      if (calibratingSamplingRef.current) {
-        const bf = expoAccelToBikeFrame(x, y, z);
-        calAccelSumRef.current.sx += bf.bx;
-        calAccelSumRef.current.sy += bf.by;
-        calAccelSumRef.current.sz += bf.bz;
-        calAccelSumRef.current.n += 1;
-      }
     });
 
     const sg = Gyroscope.addListener(({ x, y, z }) => {
@@ -415,8 +392,6 @@ export default function OscilloscopeView() {
       rawGy.value,
       rawGz.value,
       sensorTs.value,
-      slider01.value,
-      dspPhaseSv.value,
       hasCalibSv.value,
     ],
     (vals) => {
@@ -428,9 +403,7 @@ export default function OscilloscopeView() {
       const gy = vals[4] as number;
       const gz = vals[5] as number;
       const ts = vals[6] as number;
-      const slid = vals[7] as number;
-      const phase = vals[8] as number;
-      const hasCalib = vals[9] as number;
+      const hasCalib = vals[7] as number;
 
       const prevTs = lastTsSv.value;
       let dt = ts > 0 && prevTs > 0 ? ts - prevTs : 1 / 120;
@@ -441,8 +414,6 @@ export default function OscilloscopeView() {
         dt = DT_MIN_S;
       }
 
-      const alpha = sliderToAlpha(slid);
-      /** Bike frame = expo portrait axes (must be inlined — no JS helpers in worklets). */
       const bx = ax;
       const by = ay;
       const bz = az;
@@ -474,10 +445,10 @@ export default function OscilloscopeView() {
         gmz = bz / am;
       }
 
-      const e = cross(gmx, gmy, gmz, gExp.x, gExp.y, gExp.z);
-      const wx = wxg + BETA * e.x;
-      const wy = wyg + BETA * e.y;
-      const wz = wzg + BETA * e.z;
+      const eCross = cross(gmx, gmy, gmz, gExp.x, gExp.y, gExp.z);
+      const wx = wxg + BETA * eCross.x;
+      const wy = wyg + BETA * eCross.y;
+      const wz = wzg + BETA * eCross.z;
 
       const [dqw, dqx, dqy, dqz] = quatDerivative(qw, qx, qy, qz, wx, wy, wz);
       qw += dqw * dt;
@@ -490,22 +461,9 @@ export default function OscilloscopeView() {
       qySv.value = fqy;
       qzSv.value = fqz;
 
-      if (phase === 1) {
-        return;
-      }
-
       const m2 = mat3BodyToWorld(fqw, fqx, fqy, fqz);
       const aw = rotateBodyToWorld(m2, bx, by, bz);
-      /** Total world‑Z accel (g) — gravity + vertical linear component. */
-      const rawZWorld = aw.z;
-
-      /** 1) Slow DC tracker — follows creeping bias / drift only. */
-      currentGravityZSv.value =
-        ALPHA_SLOW_DC * rawZWorld +
-        (1 - ALPHA_SLOW_DC) * currentGravityZSv.value;
-
-      /** 2) High‑pass / DC blocker — drift‑free vertical acceleration. */
-      const driftFreeZ = rawZWorld - currentGravityZSv.value;
+      rawZSv.value = aw.z;
 
       if (hasCalib === 1) {
         const { pitchDeg: accelPitchDeg, rollDeg: accelRollDeg } = accelPitchRollDegAbsolute(bx, by, bz);
@@ -533,72 +491,82 @@ export default function OscilloscopeView() {
         dspPitchDeg.value = 0;
         dspRollDeg.value = 0;
       }
-
-      const emaOn = phase === 0 || phase === 2;
-      if (!emaOn) {
-        return;
-      }
-
-      /** 3) Deadzone + shock absorber — fast dual EMA on drift‑free Z (existing chart α). */
-      const inputZ = displayWorldZG(driftFreeZ);
-      const z1 = alpha * inputZ + (1 - alpha) * z1Sv.value;
-      const z2 = alpha * z1 + (1 - alpha) * z2Sv.value;
-      z1Sv.value = z1;
-      z2Sv.value = z2;
-
-      if (phase === 0) {
-        peakFifo3Sv.value = peakFifo2Sv.value;
-        peakFifo2Sv.value = peakFifo1Sv.value;
-        peakFifo1Sv.value = peakFifo0Sv.value;
-        peakFifo0Sv.value = driftFreeZ;
-        const maZ =
-          (peakFifo0Sv.value +
-            peakFifo1Sv.value +
-            peakFifo2Sv.value +
-            peakFifo3Sv.value) /
-          PEAK_MA_SAMPLES;
-
-        if (
-          Math.abs(maZ) > Math.abs(dspPeakG.value) &&
-          Math.abs(maZ) > PEAK_THRESHOLD_G
-        ) {
-          dspPeakG.value = Math.abs(maZ);
-        }
-
-        const chartSample = displayWorldZG(z2);
-
-        if (hasCalib === 1) {
-          const rDeg = dspRollDeg.value;
-          if (rDeg < 0) {
-            const magL = -rDeg;
-            if (magL > dspPeakRollLeftDeg.value) {
-              dspPeakRollLeftDeg.value = magL;
-            }
-          } else if (rDeg > 0) {
-            if (rDeg > dspPeakRollRightDeg.value) {
-              dspPeakRollRightDeg.value = rDeg;
-            }
-          }
-          if (
-            Math.abs(chartSample) > dspPeakVertZSv.value &&
-            Math.abs(chartSample) > PEAK_THRESHOLD_G
-          ) {
-            dspPeakVertZSv.value = Math.abs(chartSample);
-          }
-        }
-
-        const buf = waveData.value;
-        const idx = writeIdxSv.value % BUFFER_LEN;
-        buf[idx] = chartSample;
-        writeIdxSv.value += 1;
-        waveData.value = buf;
-
-        hudDisplayZSv.value = chartSample;
-
-        sampleTick.value += 1;
-      }
     }
   );
+
+  /**
+   * DC blocker + noise LPF (UI thread). Triggered when rawZ / phase / cal state change.
+   * — gravityZ: slow drift tracker
+   * — driftFreeZ: high-pass
+   * — cleanVertZ: fast EMA (engine noise)
+   */
+  useAnimatedReaction(
+    () => ({
+      rawZ: rawZSv.value,
+      hasCalib: hasCalibSv.value,
+    }),
+    (cur, prev) => {
+      'worklet';
+      void prev;
+      const rawZ = cur.rawZ;
+      gravityZSv.value =
+        ALPHA_GRAVITY_DRIFT * rawZ + (1 - ALPHA_GRAVITY_DRIFT) * gravityZSv.value;
+      driftFreeZSv.value = rawZ - gravityZSv.value;
+      cleanVertZSv.value =
+        VERT_FAST_ALPHA * driftFreeZSv.value +
+        (1 - VERT_FAST_ALPHA) * cleanVertZSv.value;
+
+      const hasCalib = cur.hasCalib;
+      const chartSample = displayWorldZG(cleanVertZSv.value);
+
+      peakFifo3Sv.value = peakFifo2Sv.value;
+      peakFifo2Sv.value = peakFifo1Sv.value;
+      peakFifo1Sv.value = peakFifo0Sv.value;
+      peakFifo0Sv.value = driftFreeZSv.value;
+      const maZ =
+        (peakFifo0Sv.value +
+          peakFifo1Sv.value +
+          peakFifo2Sv.value +
+          peakFifo3Sv.value) /
+        PEAK_MA_SAMPLES;
+
+      if (Math.abs(maZ) > Math.abs(dspPeakG.value) && Math.abs(maZ) > PEAK_THRESHOLD_G) {
+        dspPeakG.value = Math.abs(maZ);
+      }
+
+      if (hasCalib === 1) {
+        const rDeg = dspRollDeg.value;
+        if (rDeg < 0) {
+          const magL = -rDeg;
+          if (magL > dspPeakRollLeftDeg.value) {
+            dspPeakRollLeftDeg.value = magL;
+          }
+        } else if (rDeg > 0) {
+          if (rDeg > dspPeakRollRightDeg.value) {
+            dspPeakRollRightDeg.value = rDeg;
+          }
+        }
+        if (
+          Math.abs(chartSample) > dspPeakVertZSv.value &&
+          Math.abs(chartSample) > PEAK_THRESHOLD_G
+        ) {
+          dspPeakVertZSv.value = Math.abs(chartSample);
+        }
+      }
+
+      const buf = waveData.value;
+      const idx = writeIdxSv.value % BUFFER_LEN;
+      buf[idx] = chartSample;
+      writeIdxSv.value += 1;
+      waveData.value = buf;
+
+      hudDisplayZSv.value = chartSample;
+      sampleTick.value += 1;
+    }
+  );
+
+  /** Strict Vert Z for HUD: deadzone(cleanVertZ) — useDerivedValue keeps Skia/HUD on same signal. */
+  const vertZHudDerived = useDerivedValue(() => displayWorldZG(cleanVertZSv.value));
 
   const pushHud = useCallback((snap: HudSnap) => {
     setHud(snap);
@@ -618,12 +586,12 @@ export default function OscilloscopeView() {
       roll: dspRollDeg.value,
       peak: dspPeakG.value,
       speed: vKmh < SPEED_DISPLAY_ZERO_BELOW_KMH ? 0 : vKmh,
-      zG: hudDisplayZSv.value,
+      zG: vertZHudDerived.value,
       peakRollLeft: dspPeakRollLeftDeg.value,
       peakRollRight: dspPeakRollRightDeg.value,
       peakVertZ: dspPeakVertZSv.value,
     });
-  }, [pushHud]);
+  }, [pushHud, vertZHudDerived]);
   /* eslint-enable react-hooks/exhaustive-deps */
 
   useFrameCallback(hudFrameWorklet);
@@ -709,114 +677,63 @@ export default function OscilloscopeView() {
     return p;
   });
 
-  const clearCalTimers = useCallback(() => {
-    if (calTimerRef.current) {
-      clearTimeout(calTimerRef.current);
-      calTimerRef.current = null;
-    }
-    if (stabTimerRef.current) {
-      clearTimeout(stabTimerRef.current);
-      stabTimerRef.current = null;
-    }
+  const flashCalBanner = useCallback(() => {
+    setCalUiBanner('CAL · Z zero');
+    setTimeout(() => setCalUiBanner(null), 450);
   }, []);
 
-  useEffect(
-    () => () => {
-      clearCalTimers();
-    },
-    [clearCalTimers]
-  );
+  /** Instant calibration: snap gravityZ = raw_Z; cleanVertZ / chart → 0 g; pitch/roll bias from current accel. */
+  const instantCalibrate = useCallback(() => {
+    runOnUI(() => {
+      'worklet';
+      const bx = rawAx.value;
+      const by = rawAy.value;
+      const bz = rawAz.value;
+      const qw = qwSv.value;
+      const qx = qxSv.value;
+      const qy = qySv.value;
+      const qz = qzSv.value;
+      const m2 = mat3BodyToWorld(qw, qx, qy, qz);
+      const aw = rotateBodyToWorld(m2, bx, by, bz);
+      const rz = aw.z;
+      rawZSv.value = rz;
+      offsetZSv.value = 0;
+      qCalW.value = qw;
+      qCalX.value = qx;
+      qCalY.value = qy;
+      qCalZ.value = qz;
+      gravityZSv.value = rz;
+      driftFreeZSv.value = 0;
+      cleanVertZSv.value = 0;
 
-  const finishCalibrationWindow = useCallback(() => {
-    calibratingSamplingRef.current = false;
-    calTimerRef.current = null;
-
-    const { sx, sy, sz, n } = calAccelSumRef.current;
-    if (n < 40) {
+      dspPeakG.value = 0;
+      peakFifo0Sv.value = 0;
+      peakFifo1Sv.value = 0;
+      peakFifo2Sv.value = 0;
+      peakFifo3Sv.value = 0;
+      dspPeakRollLeftDeg.value = 0;
+      dspPeakRollRightDeg.value = 0;
+      dspPeakVertZSv.value = 0;
+      dspPitchDeg.value = 0;
+      dspRollDeg.value = 0;
+      const { pitchDeg: pCal, rollDeg: rCal } = accelPitchRollDegAbsolute(bx, by, bz);
+      pitchCalBiasDegSv.value = pCal;
+      rollCalBiasDegSv.value = rCal;
+      pitchFusDegSv.value = pCal;
+      rollFusDegSv.value = rCal;
+      const buf = waveData.value;
+      buf.fill(0);
+      waveData.value = buf;
+      writeIdxSv.value = 0;
+      sampleTick.value = 0;
+      const chartZero = displayWorldZG(cleanVertZSv.value);
+      hudDisplayZSv.value = chartZero;
+      hasCalibSv.value = 1;
       dspPhaseSv.value = 0;
-      setCalUiBanner(null);
-      return;
-    }
-
-    const avx = sx / n;
-    const avy = sy / n;
-    const avz = sz / n;
-
-    const qw = qwSv.value;
-    const qx = qxSv.value;
-    const qy = qySv.value;
-    const qz = qzSv.value;
-
-    const ix = rawAx.value;
-    const iy = rawAy.value;
-    const iz = rawAz.value;
-
-    runOnUI(
-      (
-        ax: number,
-        ay: number,
-        az: number,
-        rx: number,
-        ry: number,
-        rz: number,
-        rqw: number,
-        rqx: number,
-        rqy: number,
-        rqz: number
-      ) => {
-        'worklet';
-        const m = mat3BodyToWorld(rqw, rqx, rqy, rqz);
-        offsetZSv.value = 0;
-        qCalW.value = rqw;
-        qCalX.value = rqx;
-        qCalY.value = rqy;
-        qCalZ.value = rqz;
-        const awInst = rotateBodyToWorld(m, rx, ry, rz);
-        /** Snap dynamic gravity estimate — instant zero error on vertical axis. */
-        currentGravityZSv.value = awInst.z;
-        const lzSync = displayWorldZG(awInst.z - currentGravityZSv.value);
-        z1Sv.value = lzSync;
-        z2Sv.value = lzSync;
-        hudDisplayZSv.value = lzSync;
-        dspPeakG.value = 0;
-        peakFifo0Sv.value = 0;
-        peakFifo1Sv.value = 0;
-        peakFifo2Sv.value = 0;
-        peakFifo3Sv.value = 0;
-        dspPeakRollLeftDeg.value = 0;
-        dspPeakRollRightDeg.value = 0;
-        dspPeakVertZSv.value = 0;
-        dspPitchDeg.value = 0;
-        dspRollDeg.value = 0;
-        const { pitchDeg: pCal, rollDeg: rCal } = accelPitchRollDegAbsolute(avx, avy, avz);
-        pitchCalBiasDegSv.value = pCal;
-        rollCalBiasDegSv.value = rCal;
-        pitchFusDegSv.value = pCal;
-        rollFusDegSv.value = rCal;
-        const buf = waveData.value;
-        buf.fill(0);
-        waveData.value = buf;
-        writeIdxSv.value = 0;
-        sampleTick.value = 0;
-        hasCalibSv.value = 1;
-        dspPhaseSv.value = 2;
-      }
-    )(avx, avy, avz, ix, iy, iz, qw, qx, qy, qz);
-
-    setCalUiBanner('STABILIZING…');
-    stabTimerRef.current = setTimeout(() => {
-      runOnUI(() => {
-        'worklet';
-        dspPhaseSv.value = 0;
-      })();
-      stabTimerRef.current = null;
-      setCalUiBanner(null);
-    }, STABILIZE_MS);
-  },
-  // Shared values are read when the timer fires; empty deps keep a stable timer target.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  []
-);
+    })();
+    flashCalBanner();
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [flashCalBanner]);
 
   const resetPeakMax = useCallback(() => {
     runOnUI(() => {
@@ -840,56 +757,6 @@ export default function OscilloscopeView() {
     dspPeakRollRightDeg,
     dspPeakVertZSv,
   ]);
-
-  const snapDynamicGravityBaseline = useCallback(() => {
-    runOnUI(() => {
-      'worklet';
-      const bx = rawAx.value;
-      const by = rawAy.value;
-      const bz = rawAz.value;
-      const qw = qwSv.value;
-      const qx = qxSv.value;
-      const qy = qySv.value;
-      const qz = qzSv.value;
-      const m2 = mat3BodyToWorld(qw, qx, qy, qz);
-      const aw = rotateBodyToWorld(m2, bx, by, bz);
-      offsetZSv.value = 0;
-      currentGravityZSv.value = aw.z;
-      const sync = displayWorldZG(aw.z - currentGravityZSv.value);
-      z1Sv.value = sync;
-      z2Sv.value = sync;
-      hudDisplayZSv.value = sync;
-    })();
-  }, [
-    rawAx,
-    rawAy,
-    rawAz,
-    qwSv,
-    qxSv,
-    qySv,
-    qzSv,
-    offsetZSv,
-    currentGravityZSv,
-    z1Sv,
-    z2Sv,
-    hudDisplayZSv,
-  ]);
-
-  const startCalibration = useCallback(
-    () => {
-      if (calUiBanner !== null) {
-        return;
-      }
-      clearCalTimers();
-      calAccelSumRef.current = { sx: 0, sy: 0, sz: 0, n: 0 };
-      calibratingSamplingRef.current = true;
-      dspPhaseSv.value = 1;
-      snapDynamicGravityBaseline();
-      setCalUiBanner('HOLD STILL — CAL 5s');
-      calTimerRef.current = setTimeout(finishCalibrationWindow, CAL_DURATION_MS);
-    },
-    [calUiBanner, clearCalTimers, dspPhaseSv, finishCalibrationWindow, snapDynamicGravityBaseline]
-  );
 
   const panStartRel = useSharedValue(0);
   const trackW = Math.min(320, Math.max(winW - 48, 140));
@@ -1022,7 +889,7 @@ export default function OscilloscopeView() {
         {advancedSettingsOpen && !dashLocked ? (
           <View style={styles.advancedPanel}>
             <Text style={[styles.advancedTitle, { fontFamily: mono }]}>
-              ADVANCED · CHART α 0.12–0.15
+              ADVANCED · VERT FAST α FIXED (0.15)
             </Text>
             <View style={styles.sensRow}>
               <Text style={[styles.sensLabel, { fontFamily: mono }]}>CHART α</Text>
@@ -1052,9 +919,9 @@ export default function OscilloscopeView() {
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Five second calibration: keep device still on a level surface. Long press to open filter settings."
+            accessibilityLabel="Instant calibration: snap vertical axis to zero using current gravity. Long press to open filter settings."
             disabled={calUiBanner !== null}
-            onPress={startCalibration}
+            onPress={instantCalibrate}
             onLongPress={() => {
               if (!dashLocked) {
                 setAdvancedSettingsOpen(true);
