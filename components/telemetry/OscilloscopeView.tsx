@@ -126,140 +126,89 @@ function quatDerivative(
   return [dqw, dqx, dqy, dqz];
 }
 
-/** Slider 0–1 maps to pole α ∈ [0.15, 0.20] (two cascaded one‑poles; responsive, still filters engine buzz). */
+/** Chart EMA pole α ∈ [0.12, 0.15] — high smoothness (“buttery” trace). Slider scales within band. */
 function sliderToAlpha(slider01: number) {
   'worklet';
   const s = Math.min(Math.max(slider01, 0), 1);
-  return 0.15 + s * 0.05;
+  return 0.12 + s * 0.03;
 }
 
-/** Complementary filter: angle = Kg*(angle + ω*dt) + Ka*accel_angle (anchors to gravity when stationary). */
-const COMP_K_GYRO = 0.98;
-const COMP_K_ACC = 0.02;
+/** Stationary: trust gravity more (accel blend ↑). Matches (1−ALPHA)=~0.10 */
+const ACCEL_WEIGHT_STAT = 0.1;
+/** Dynamic: trust gyro predominantly. Matches (1−ALPHA)=~0.01 */
+const ACCEL_WEIGHT_DYNAMIC = 0.01;
+/** gyro rad/s — blend interpolates stationary→dynamic across this span */
+const ACCEL_BLEND_STATIC_GYRO_MAG_RPS = 0.06;
+const ACCEL_BLEND_DYNAMIC_GYRO_MAG_RPS = 0.26;
 
-/** Above this speed (km/h) we do not apply stationary table lock. */
-const SPEED_TABLE_LOCK_ABOVE_KMH = 1.0;
-/** Stationary if |ω| < this (rad/s). */
-const GYRO_STATIONARY_RAD_S = 0.055;
+/**
+ * Adaptive accel weight for complementary fusion (decouples pitch/roll under motion vs gravity at rest).
+ * angle = ALPHA·(prev + gyro·Δt) + (1−ALPHA)·accel; (1−ALPHA)=accelBlend.
+ */
+function adaptiveAccelBlend(gyroMagRadS: number) {
+  'worklet';
+  const low = ACCEL_BLEND_STATIC_GYRO_MAG_RPS;
+  const high = ACCEL_BLEND_DYNAMIC_GYRO_MAG_RPS;
+  if (gyroMagRadS <= low) {
+    return ACCEL_WEIGHT_STAT;
+  }
+  if (gyroMagRadS >= high) {
+    return ACCEL_WEIGHT_DYNAMIC;
+  }
+  const t = (gyroMagRadS - low) / (high - low);
+  return ACCEL_WEIGHT_STAT + t * (ACCEL_WEIGHT_DYNAMIC - ACCEL_WEIGHT_STAT);
+}
+
+/** HUD pitch/roll complementary display EMA — heavy damping for motorcycle vibration (stable, “heavy”). */
+const HUD_ANGLE_EMA = 0.03;
+
+const RAD_TO_DEG = 180 / Math.PI;
 
 /** dt clamps: integration stability + avoid duplicate timestamps. */
 const DT_MIN_S = 1 / 800;
 const DT_MAX_S = 0.12;
 
-/** World-Z dead zone after calibration (g). */
-const Z_CLAMP_G = 0.02;
+/**
+ * Stationary deadzone (g): |World_Z| below this → display 0.00 (chart + leak prevention).
+ */
+const STATIONARY_DEADZONE_Z_G = 0.04;
 
 /** Speed below this (km/h) displays as zero. */
 const SPEED_DISPLAY_ZERO_BELOW_KMH = 5;
 
-/** q ⊗ r — norm inlined so this worklet has no unresolved sibling calls under RN Worklets bundling. */
-function quatMultiplyTuple(
-  aw: number,
-  ax: number,
-  ay: number,
-  az: number,
-  bw: number,
-  bx: number,
-  by: number,
-  bz: number
-): [number, number, number, number] {
+/** Absolute tilt (deg): Pitch = atan2(ay, az), Roll = atan2(-ax, √(ay²+az²)) — accelerometer gravity anchor. */
+function accelPitchRollDegAbsolute(ax: number, ay: number, az: number): {
+  pitchDeg: number;
+  rollDeg: number;
+} {
   'worklet';
-  let rw = aw * bw - ax * bx - ay * by - az * bz;
-  let rx = aw * bx + ax * bw + ay * bz - az * by;
-  let ry = aw * by - ax * bz + ay * bw + az * bx;
-  let rz = aw * bz + ax * by - ay * bx + az * bw;
-  let lenSq = rw * rw + rx * rx + ry * ry + rz * rz;
-  if (lenSq < 1e-24) {
-    return [1, 0, 0, 0];
-  }
-  const inv = 1 / Math.sqrt(lenSq);
-  rw *= inv;
-  rx *= inv;
-  ry *= inv;
-  rz *= inv;
-  return [rw, rx, ry, rz];
-}
-
-/** q_rel = q_cal⁻¹ ⊗ q — attitude relative to calibration snapshot (level reference). */
-function relativeQuat(
-  qcw: number,
-  qcx: number,
-  qcy: number,
-  qcz: number,
-  qw: number,
-  qx: number,
-  qy: number,
-  qz: number
-): [number, number, number, number] {
-  'worklet';
-  const icw = qcw;
-  const icx = -qcx;
-  const icy = -qcy;
-  const icz = -qcz;
-  return quatMultiplyTuple(icw, icx, icy, icz, qw, qx, qy, qz);
-}
-
-/** Roll / pitch from world +Z direction in bike body (relative quaternion). Y = longitudinal, Z = vertical. */
-function rollPitchDegFromRelQuat(qw: number, qx: number, qy: number, qz: number) {
-  'worklet';
-  const m = mat3BodyToWorld(qw, qx, qy, qz);
-  const gbx = m.m02;
-  const gby = m.m12;
-  const gbz = m.m22;
-  const rollRad = Math.atan2(gbx, gbz);
-  const pitchRad = Math.atan2(-gby, Math.sqrt(gbx * gbx + gbz * gbz));
-  return {
-    rollDeg: (rollRad * 180) / Math.PI,
-    pitchDeg: (pitchRad * 180) / Math.PI,
-  };
-}
-
-/** Minimal quaternion rotating body +Z so it aligns with unit vector v (accel-only tilt). */
-function quatAlignZToV(vx: number, vy: number, vz: number): [number, number, number, number] {
-  'worklet';
-  const dot = vz;
-  const cx = -vy;
-  const cy = vx;
-  const cz = 0;
-  const cLenSq = cx * cx + cy * cy;
-  if (cLenSq < 1e-12) {
-    if (dot > 0) {
-      return [1, 0, 0, 0];
-    }
-    return [0, 1, 0, 0];
-  }
-  const cLen = Math.sqrt(cLenSq);
-  const ax = cx / cLen;
-  const ay = cy / cLen;
-  const az = cz / cLen;
-  let ang = Math.atan2(cLen, dot);
-  if (ang > Math.PI * 0.5) {
-    ang -= Math.PI;
-  }
-  const half = ang * 0.5;
-  const sh = Math.sin(half);
-  return [Math.cos(half), ax * sh, ay * sh, az * sh];
-}
-
-/** Roll φ′ · pitch θ′ (rad/s) from body-frame gyro matching rollPitchDegFromRelQuat convention. */
-function eulerRatesRollPitchRad(phi: number, theta: number, gx: number, gy: number, gz: number) {
-  'worklet';
-  const sinP = Math.sin(phi);
-  const cosP = Math.cos(phi);
-  const sinT = Math.sin(theta);
-  const cosT = Math.cos(theta);
-  const cosTAbs = Math.abs(cosT);
-  const tanT = cosTAbs > 1e-3 ? sinT / (cosTAbs > 1e-2 ? cosT : 1e-2 * Math.sign(cosT || 1)) : sinT;
-  const rollDot = gx + gy * sinP * tanT + gz * cosP * tanT;
-  const pitchDot = gy * cosP - gz * sinP;
-  return { rollDot, pitchDot };
+  const yz = ay * ay + az * az;
+  const denom = yz > 0 ? Math.sqrt(yz) : 0;
+  const pitchDeg = Math.atan2(ay, az) * RAD_TO_DEG;
+  const rollDeg = Math.atan2(-ax, denom) * RAD_TO_DEG;
+  return { pitchDeg, rollDeg };
 }
 
 /** Gravity direction correction (accel vs expected) fused into gyro. */
 const BETA = 0.04;
 
-/** Soft peak decay so readout settles without instantaneous collapse. */
-const PEAK_HOLD_DECAY = 0.997;
+/** Peak-G hysteresis — ignore buzz below this magnitude on MA_Z (motorcycle vibration). */
+const PEAK_THRESHOLD_G = 0.15;
+/** Moving-average length for Peak-G (40ms @ ~100Hz-ish sampling ≈ 4 samples). */
+const PEAK_MA_SAMPLES = 4;
+
+/**
+ * Slow EMA coefficient for tracking world-Z gravity / DC bias (sensor drift).
+ * Only long-term creep; sudden bumps stay in the high-pass output.
+ */
+const ALPHA_SLOW_DC = 0.002;
+
+/** Clamp world linear Z after offset for display pipeline (OSC + HUD). */
+function displayWorldZG(zAfterOffsetG: number) {
+  'worklet';
+  const z = zAfterOffsetG;
+  return Math.abs(z) < STATIONARY_DEADZONE_Z_G ? 0 : z;
+}
 
 const MONO = Platform.select({
   ios: 'Menlo',
@@ -272,11 +221,17 @@ type HudSnap = {
   roll: number;
   peak: number;
   speed: number;
+  /** Deadzone’d vertical linear G (same as chart). */
+  zG: number;
+  peakRollLeft: number;
+  peakRollRight: number;
+  peakVertZ: number;
 };
 
 export default function OscilloscopeView() {
   const { width: winW, height: winH } = useWindowDimensions();
   const insets = useSafeAreaInsets();
+  const mono = (MONO as string) ?? 'monospace';
 
   const chartWsv = useSharedValue(Math.max(winW, 120));
   const chartHsv = useSharedValue(winH);
@@ -294,11 +249,14 @@ export default function OscilloscopeView() {
   const qySv = useSharedValue(0);
   const qzSv = useSharedValue(0);
 
+  /** Dynamic gravity / DC estimate (world Z, g) — slow EMA of raw_Z; drift-free Z = raw − this. */
+  const currentGravityZSv = useSharedValue(1);
+
   const z1Sv = useSharedValue(0);
   const z2Sv = useSharedValue(0);
 
-  /** World-Z bias captured from stationary average: Final_Z = (R·a).z − offsetZSv */
-  const offsetZSv = useSharedValue(1);
+  /** Legacy static Z bias (unused for display; kept 0 — vertical axis uses currentGravityZSv). */
+  const offsetZSv = useSharedValue(0);
 
   /** Attitude snapshot at calibration end for relative pitch / roll HUD. */
   const qCalW = useSharedValue(1);
@@ -311,23 +269,47 @@ export default function OscilloscopeView() {
   /** After first CAL, relative angles are trustworthy. */
   const hasCalibSv = useSharedValue(0);
 
-  const slider01 = useSharedValue(0.5);
+  const slider01 = useSharedValue(1 / 3);
 
   const writeIdxSv = useSharedValue(0);
   const waveData = useSharedValue(new Float32Array(BUFFER_LEN));
   const sampleTick = useSharedValue(0);
 
-  /** Complementary filter state (rad), relative to cal — anchored by gravity accel term. */
-  const pitchFusRadSv = useSharedValue(0);
-  const rollFusRadSv = useSharedValue(0);
+  /** Fused absolute pitch/roll (deg); complementary filter with accel anchor. */
+  const pitchFusDegSv = useSharedValue(0);
+  const rollFusDegSv = useSharedValue(0);
+  /** Snapshot of absolute tilt at CAL (deg) — HUD shows fused minus these. */
+  const pitchCalBiasDegSv = useSharedValue(0);
+  const rollCalBiasDegSv = useSharedValue(0);
 
   const dspPitchDeg = useSharedValue(0);
   const dspRollDeg = useSharedValue(0);
   const dspPeakG = useSharedValue(0);
+  /** Max lean magnitudes (deg, positive each side) from HUD roll after cal. */
+  const dspPeakRollLeftDeg = useSharedValue(0);
+  const dspPeakRollRightDeg = useSharedValue(0);
+  /** Max magnitude of displayed Vert Z (deadzone’d, post shock filter). */
+  const dspPeakVertZSv = useSharedValue(0);
+  /** Last chart sample (g) after deadzone — HUD Z readout. */
+  const hudDisplayZSv = useSharedValue(0);
+  /** Rolling raw Z (after grav offset, pre deadzone) for Peak-G MA buffer. */
+  const peakFifo0Sv = useSharedValue(0);
+  const peakFifo1Sv = useSharedValue(0);
+  const peakFifo2Sv = useSharedValue(0);
+  const peakFifo3Sv = useSharedValue(0);
 
   const speedKmH = useSharedValue(0);
 
-  const [hud, setHud] = useState<HudSnap>({ pitch: 0, roll: 0, peak: 0, speed: 0 });
+  const [hud, setHud] = useState<HudSnap>({
+    pitch: 0,
+    roll: 0,
+    peak: 0,
+    speed: 0,
+    zG: 0,
+    peakRollLeft: 0,
+    peakRollRight: 0,
+    peakVertZ: 0,
+  });
   const [calUiBanner, setCalUiBanner] = useState<string | null>(null);
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [dashLocked, setDashLocked] = useState(false);
@@ -434,14 +416,8 @@ export default function OscilloscopeView() {
       rawGz.value,
       sensorTs.value,
       slider01.value,
-      offsetZSv.value,
       dspPhaseSv.value,
-      qCalW.value,
-      qCalX.value,
-      qCalY.value,
-      qCalZ.value,
       hasCalibSv.value,
-      speedKmH.value,
     ],
     (vals) => {
       'worklet';
@@ -453,14 +429,8 @@ export default function OscilloscopeView() {
       const gz = vals[5] as number;
       const ts = vals[6] as number;
       const slid = vals[7] as number;
-      const offsetZ = vals[8] as number;
-      const phase = vals[9] as number;
-      const qcW = vals[10] as number;
-      const qcX = vals[11] as number;
-      const qcY = vals[12] as number;
-      const qcZ = vals[13] as number;
-      const hasCalib = vals[14] as number;
-      const spdKmh = vals[15] as number;
+      const phase = vals[8] as number;
+      const hasCalib = vals[9] as number;
 
       const prevTs = lastTsSv.value;
       let dt = ts > 0 && prevTs > 0 ? ts - prevTs : 1 / 120;
@@ -526,80 +496,104 @@ export default function OscilloscopeView() {
 
       const m2 = mat3BodyToWorld(fqw, fqx, fqy, fqz);
       const aw = rotateBodyToWorld(m2, bx, by, bz);
-      const lx = aw.x;
-      const ly = aw.y;
-      let lz = aw.z - offsetZ;
-      if (Math.abs(lz) < Z_CLAMP_G) {
-        lz = 0;
-      }
+      /** Total world‑Z accel (g) — gravity + vertical linear component. */
+      const rawZWorld = aw.z;
+
+      /** 1) Slow DC tracker — follows creeping bias / drift only. */
+      currentGravityZSv.value =
+        ALPHA_SLOW_DC * rawZWorld +
+        (1 - ALPHA_SLOW_DC) * currentGravityZSv.value;
+
+      /** 2) High‑pass / DC blocker — drift‑free vertical acceleration. */
+      const driftFreeZ = rawZWorld - currentGravityZSv.value;
 
       if (hasCalib === 1) {
+        const { pitchDeg: accelPitchDeg, rollDeg: accelRollDeg } = accelPitchRollDegAbsolute(bx, by, bz);
+        const gyroPitchDegS = gy * RAD_TO_DEG;
+        const gyroRollDegS = gx * RAD_TO_DEG;
         const gyroMag = Math.sqrt(gx * gx + gy * gy + gz * gz);
-        const tableStill =
-          spdKmh < SPEED_TABLE_LOCK_ABOVE_KMH && gyroMag < GYRO_STATIONARY_RAD_S;
+        const accelBlend = adaptiveAccelBlend(gyroMag);
+        const gyroBlend = 1 - accelBlend;
 
-        if (tableStill) {
-          pitchFusRadSv.value = 0;
-          rollFusRadSv.value = 0;
-          dspPitchDeg.value = 0;
-          dspRollDeg.value = 0;
-        } else if (am > 0.15) {
-          const [qaW, qaX, qaY, qaZ] = normalizeQuat(...quatAlignZToV(gmx, gmy, gmz));
-          const [rqAw, rqAx, rqAy, rqAz] = relativeQuat(qcW, qcX, qcY, qcZ, qaW, qaX, qaY, qaZ);
-          const rpAcc = rollPitchDegFromRelQuat(rqAw, rqAx, rqAy, rqAz);
-          const pitchAccRad = (rpAcc.pitchDeg * Math.PI) / 180;
-          const rollAccRad = (rpAcc.rollDeg * Math.PI) / 180;
+        const pitchPred = pitchFusDegSv.value + gyroPitchDegS * dt;
+        const rollPred = rollFusDegSv.value + gyroRollDegS * dt;
 
-          const pr = pitchFusRadSv.value;
-          const rr = rollFusRadSv.value;
-          const { rollDot, pitchDot } = eulerRatesRollPitchRad(rr, pr, gx, gy, gz);
-          const pitchPred = pr + pitchDot * dt;
-          const rollPred = rr + rollDot * dt;
-          pitchFusRadSv.value = COMP_K_GYRO * pitchPred + COMP_K_ACC * pitchAccRad;
-          rollFusRadSv.value = COMP_K_GYRO * rollPred + COMP_K_ACC * rollAccRad;
-          dspPitchDeg.value = (pitchFusRadSv.value * 180) / Math.PI;
-          dspRollDeg.value = (rollFusRadSv.value * 180) / Math.PI;
-        } else {
-          const pr = pitchFusRadSv.value;
-          const rr = rollFusRadSv.value;
-          const { rollDot, pitchDot } = eulerRatesRollPitchRad(rr, pr, gx, gy, gz);
-          pitchFusRadSv.value = pr + pitchDot * dt;
-          rollFusRadSv.value = rr + rollDot * dt;
-          dspPitchDeg.value = (pitchFusRadSv.value * 180) / Math.PI;
-          dspRollDeg.value = (rollFusRadSv.value * 180) / Math.PI;
-        }
+        pitchFusDegSv.value =
+          gyroBlend * pitchPred + accelBlend * accelPitchDeg;
+        rollFusDegSv.value = gyroBlend * rollPred + accelBlend * accelRollDeg;
+
+        const pitchRel = pitchFusDegSv.value - pitchCalBiasDegSv.value;
+        const rollRel = rollFusDegSv.value - rollCalBiasDegSv.value;
+        dspPitchDeg.value =
+          HUD_ANGLE_EMA * pitchRel + (1 - HUD_ANGLE_EMA) * dspPitchDeg.value;
+        dspRollDeg.value = HUD_ANGLE_EMA * rollRel + (1 - HUD_ANGLE_EMA) * dspRollDeg.value;
       } else {
-        pitchFusRadSv.value = 0;
-        rollFusRadSv.value = 0;
+        pitchFusDegSv.value = 0;
+        rollFusDegSv.value = 0;
         dspPitchDeg.value = 0;
         dspRollDeg.value = 0;
       }
-
-      const linMag = Math.sqrt(lx * lx + ly * ly + lz * lz);
-      let nextPeak = dspPeakG.value * PEAK_HOLD_DECAY;
-      if (linMag > nextPeak) {
-        nextPeak = linMag;
-      }
-      dspPeakG.value = nextPeak;
 
       const emaOn = phase === 0 || phase === 2;
       if (!emaOn) {
         return;
       }
 
-      const inputZ = lz;
+      /** 3) Deadzone + shock absorber — fast dual EMA on drift‑free Z (existing chart α). */
+      const inputZ = displayWorldZG(driftFreeZ);
       const z1 = alpha * inputZ + (1 - alpha) * z1Sv.value;
       const z2 = alpha * z1 + (1 - alpha) * z2Sv.value;
       z1Sv.value = z1;
       z2Sv.value = z2;
 
       if (phase === 0) {
-        const display = z2;
+        peakFifo3Sv.value = peakFifo2Sv.value;
+        peakFifo2Sv.value = peakFifo1Sv.value;
+        peakFifo1Sv.value = peakFifo0Sv.value;
+        peakFifo0Sv.value = driftFreeZ;
+        const maZ =
+          (peakFifo0Sv.value +
+            peakFifo1Sv.value +
+            peakFifo2Sv.value +
+            peakFifo3Sv.value) /
+          PEAK_MA_SAMPLES;
+
+        if (
+          Math.abs(maZ) > Math.abs(dspPeakG.value) &&
+          Math.abs(maZ) > PEAK_THRESHOLD_G
+        ) {
+          dspPeakG.value = Math.abs(maZ);
+        }
+
+        const chartSample = displayWorldZG(z2);
+
+        if (hasCalib === 1) {
+          const rDeg = dspRollDeg.value;
+          if (rDeg < 0) {
+            const magL = -rDeg;
+            if (magL > dspPeakRollLeftDeg.value) {
+              dspPeakRollLeftDeg.value = magL;
+            }
+          } else if (rDeg > 0) {
+            if (rDeg > dspPeakRollRightDeg.value) {
+              dspPeakRollRightDeg.value = rDeg;
+            }
+          }
+          if (
+            Math.abs(chartSample) > dspPeakVertZSv.value &&
+            Math.abs(chartSample) > PEAK_THRESHOLD_G
+          ) {
+            dspPeakVertZSv.value = Math.abs(chartSample);
+          }
+        }
+
         const buf = waveData.value;
         const idx = writeIdxSv.value % BUFFER_LEN;
-        buf[idx] = display;
+        buf[idx] = chartSample;
         writeIdxSv.value += 1;
         waveData.value = buf;
+
+        hudDisplayZSv.value = chartSample;
 
         sampleTick.value += 1;
       }
@@ -624,6 +618,10 @@ export default function OscilloscopeView() {
       roll: dspRollDeg.value,
       peak: dspPeakG.value,
       speed: vKmh < SPEED_DISPLAY_ZERO_BELOW_KMH ? 0 : vKmh,
+      zG: hudDisplayZSv.value,
+      peakRollLeft: dspPeakRollLeftDeg.value,
+      peakRollRight: dspPeakRollRightDeg.value,
+      peakVertZ: dspPeakVertZSv.value,
     });
   }, [pushHud]);
   /* eslint-enable react-hooks/exhaustive-deps */
@@ -768,22 +766,33 @@ export default function OscilloscopeView() {
       ) => {
         'worklet';
         const m = mat3BodyToWorld(rqw, rqx, rqy, rqz);
-        const aw = rotateBodyToWorld(m, ax, ay, az);
-        offsetZSv.value = aw.z;
+        offsetZSv.value = 0;
         qCalW.value = rqw;
         qCalX.value = rqx;
         qCalY.value = rqy;
         qCalZ.value = rqz;
-        /** EMA sync: seed both stages to current linear-Z from instant sample (eliminates post-CAL ramp). */
         const awInst = rotateBodyToWorld(m, rx, ry, rz);
-        let lzSync = awInst.z - offsetZSv.value;
-        if (Math.abs(lzSync) < Z_CLAMP_G) {
-          lzSync = 0;
-        }
+        /** Snap dynamic gravity estimate — instant zero error on vertical axis. */
+        currentGravityZSv.value = awInst.z;
+        const lzSync = displayWorldZG(awInst.z - currentGravityZSv.value);
         z1Sv.value = lzSync;
         z2Sv.value = lzSync;
-        pitchFusRadSv.value = 0;
-        rollFusRadSv.value = 0;
+        hudDisplayZSv.value = lzSync;
+        dspPeakG.value = 0;
+        peakFifo0Sv.value = 0;
+        peakFifo1Sv.value = 0;
+        peakFifo2Sv.value = 0;
+        peakFifo3Sv.value = 0;
+        dspPeakRollLeftDeg.value = 0;
+        dspPeakRollRightDeg.value = 0;
+        dspPeakVertZSv.value = 0;
+        dspPitchDeg.value = 0;
+        dspRollDeg.value = 0;
+        const { pitchDeg: pCal, rollDeg: rCal } = accelPitchRollDegAbsolute(avx, avy, avz);
+        pitchCalBiasDegSv.value = pCal;
+        rollCalBiasDegSv.value = rCal;
+        pitchFusDegSv.value = pCal;
+        rollFusDegSv.value = rCal;
         const buf = waveData.value;
         buf.fill(0);
         waveData.value = buf;
@@ -809,6 +818,63 @@ export default function OscilloscopeView() {
   []
 );
 
+  const resetPeakMax = useCallback(() => {
+    runOnUI(() => {
+      'worklet';
+      dspPeakG.value = 0;
+      peakFifo0Sv.value = 0;
+      peakFifo1Sv.value = 0;
+      peakFifo2Sv.value = 0;
+      peakFifo3Sv.value = 0;
+      dspPeakRollLeftDeg.value = 0;
+      dspPeakRollRightDeg.value = 0;
+      dspPeakVertZSv.value = 0;
+    })();
+  }, [
+    dspPeakG,
+    peakFifo0Sv,
+    peakFifo1Sv,
+    peakFifo2Sv,
+    peakFifo3Sv,
+    dspPeakRollLeftDeg,
+    dspPeakRollRightDeg,
+    dspPeakVertZSv,
+  ]);
+
+  const snapDynamicGravityBaseline = useCallback(() => {
+    runOnUI(() => {
+      'worklet';
+      const bx = rawAx.value;
+      const by = rawAy.value;
+      const bz = rawAz.value;
+      const qw = qwSv.value;
+      const qx = qxSv.value;
+      const qy = qySv.value;
+      const qz = qzSv.value;
+      const m2 = mat3BodyToWorld(qw, qx, qy, qz);
+      const aw = rotateBodyToWorld(m2, bx, by, bz);
+      offsetZSv.value = 0;
+      currentGravityZSv.value = aw.z;
+      const sync = displayWorldZG(aw.z - currentGravityZSv.value);
+      z1Sv.value = sync;
+      z2Sv.value = sync;
+      hudDisplayZSv.value = sync;
+    })();
+  }, [
+    rawAx,
+    rawAy,
+    rawAz,
+    qwSv,
+    qxSv,
+    qySv,
+    qzSv,
+    offsetZSv,
+    currentGravityZSv,
+    z1Sv,
+    z2Sv,
+    hudDisplayZSv,
+  ]);
+
   const startCalibration = useCallback(
     () => {
       if (calUiBanner !== null) {
@@ -818,10 +884,11 @@ export default function OscilloscopeView() {
       calAccelSumRef.current = { sx: 0, sy: 0, sz: 0, n: 0 };
       calibratingSamplingRef.current = true;
       dspPhaseSv.value = 1;
+      snapDynamicGravityBaseline();
       setCalUiBanner('HOLD STILL — CAL 5s');
       calTimerRef.current = setTimeout(finishCalibrationWindow, CAL_DURATION_MS);
     },
-    [calUiBanner, clearCalTimers, dspPhaseSv, finishCalibrationWindow]
+    [calUiBanner, clearCalTimers, dspPhaseSv, finishCalibrationWindow, snapDynamicGravityBaseline]
   );
 
   const panStartRel = useSharedValue(0);
@@ -870,34 +937,16 @@ export default function OscilloscopeView() {
 
         {calUiBanner ? (
           <View style={styles.calBanner} pointerEvents="none">
-            <Text style={[styles.calBannerText, { fontFamily: MONO as string }]}>{calUiBanner}</Text>
+            <Text style={[styles.calBannerText, { fontFamily: mono }]}>{calUiBanner}</Text>
           </View>
         ) : null}
       </View>
 
-      <View style={[styles.bottomPanel, { paddingBottom: Math.max(insets.bottom, 10) }]}>
-        <View style={styles.hudHeaderRow}>
+      <View style={[styles.bottomPanel, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+        <View style={styles.hudTopBar}>
           <View style={styles.logoCluster}>
-            <Text style={[styles.logo, { fontFamily: MONO as string }]}>LAUDA</Text>
-            <Text style={[styles.logoSub, { fontFamily: MONO as string }]}>OSC TRACE</Text>
-          </View>
-          <View style={styles.metricsWrap}>
-            <HudLine label="SPD" value={`${hud.speed.toFixed(1)}`} suffix="km/h" muted={false} compact />
-            <HudLine
-              label="PITCH"
-              value={`${hud.pitch >= 0 ? '+' : ''}${hud.pitch.toFixed(1)}`}
-              suffix="deg"
-              muted={false}
-              compact
-            />
-            <HudLine
-              label="ROLL"
-              value={`${hud.roll >= 0 ? '+' : ''}${hud.roll.toFixed(1)}`}
-              suffix="deg"
-              muted={false}
-              compact
-            />
-            <HudLine label="PEAK-G" value={hud.peak.toFixed(2)} suffix="" alert compact />
+            <Text style={[styles.logo, { fontFamily: mono }]}>LAUDA</Text>
+            <Text style={[styles.logoSub, { fontFamily: mono }]}>OSC TRACE</Text>
           </View>
           <View style={styles.dashboardTools}>
             <Pressable
@@ -932,11 +981,51 @@ export default function OscilloscopeView() {
           </View>
         </View>
 
+        <View style={styles.hudMetricsPanel}>
+          <View style={styles.hudSection}>
+            <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Motion</Text>
+            <View style={styles.hudMetricRow}>
+              <HudMetricTile label="SPD" value={hud.speed.toFixed(1)} suffix="km/h" mono={mono} />
+              <HudMetricTile
+                label="Pitch"
+                value={`${hud.pitch >= 0 ? '+' : ''}${hud.pitch.toFixed(1)}`}
+                suffix="°"
+                mono={mono}
+              />
+              <HudMetricTile
+                label="Roll"
+                value={`${hud.roll >= 0 ? '+' : ''}${hud.roll.toFixed(1)}`}
+                suffix="°"
+                mono={mono}
+              />
+            </View>
+          </View>
+
+          <View style={styles.hudSection}>
+            <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Acceleration</Text>
+            <View style={styles.hudMetricRow}>
+              <HudMetricTile label="Peak G" value={hud.peak.toFixed(2)} suffix="g" alert mono={mono} />
+              <HudMetricTile label="Vert Z" value={hud.zG.toFixed(2)} suffix="g" muted mono={mono} />
+            </View>
+          </View>
+
+          <View style={styles.hudSection}>
+            <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Peak · max</Text>
+            <View style={styles.hudMetricRow}>
+              <HudMetricTile label="Roll left" value={hud.peakRollLeft.toFixed(1)} suffix="°" mono={mono} />
+              <HudMetricTile label="Roll right" value={hud.peakRollRight.toFixed(1)} suffix="°" mono={mono} />
+              <HudMetricTile label="Peak Vert Z" value={hud.peakVertZ.toFixed(2)} suffix="g" mono={mono} />
+            </View>
+          </View>
+        </View>
+
         {advancedSettingsOpen && !dashLocked ? (
           <View style={styles.advancedPanel}>
-            <Text style={[styles.advancedTitle, { fontFamily: MONO as string }]}>ADVANCED · FILTER α</Text>
+            <Text style={[styles.advancedTitle, { fontFamily: mono }]}>
+              ADVANCED · CHART α 0.12–0.15
+            </Text>
             <View style={styles.sensRow}>
-              <Text style={[styles.sensLabel, { fontFamily: MONO as string }]}>FILTER α</Text>
+              <Text style={[styles.sensLabel, { fontFamily: mono }]}>CHART α</Text>
               <GestureDetector gesture={pan}>
                 <View style={[styles.track, { width: trackW }]}>
                   <View style={styles.trackFill} />
@@ -948,6 +1037,19 @@ export default function OscilloscopeView() {
         ) : null}
 
         <View style={styles.calRow}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Reset peak G and angle maximums to zero"
+            disabled={dashLocked || calUiBanner !== null}
+            onPress={resetPeakMax}
+            style={({ pressed }) => [
+              styles.resetMaxBtn,
+              (dashLocked || calUiBanner !== null) && styles.resetMaxBtnDisabled,
+              pressed && styles.resetMaxBtnPressed,
+            ]}
+          >
+            <Text style={[styles.resetMaxLabel, { fontFamily: mono }]}>RESET MAX</Text>
+          </Pressable>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Five second calibration: keep device still on a level surface. Long press to open filter settings."
@@ -966,7 +1068,7 @@ export default function OscilloscopeView() {
             ]}
           >
             <View pointerEvents="none" style={styles.calGlow} />
-            <Text style={[styles.calLabel, { fontFamily: MONO as string }]}>CAL</Text>
+            <Text style={[styles.calLabel, { fontFamily: mono }]}>CAL</Text>
           </Pressable>
         </View>
       </View>
@@ -974,45 +1076,31 @@ export default function OscilloscopeView() {
   );
 }
 
-function HudLine({
+function HudMetricTile({
   label,
   value,
   suffix,
-  muted,
   alert,
-  compact,
+  muted,
+  mono,
 }: {
   label: string;
   value: string;
   suffix: string;
-  muted?: boolean;
   alert?: boolean;
-  compact?: boolean;
+  muted?: boolean;
+  mono: string;
 }) {
+  const valColor = alert ? '#ff6b82' : muted ? '#87b89a' : '#c4f5dc';
   return (
-    <View style={[styles.hudBlock, compact && styles.hudBlockCompact]}>
-      <Text
-        style={[
-          styles.hudLab,
-          compact && styles.hudLabCompact,
-          { fontFamily: MONO as string, opacity: muted ? 0.45 : 0.75 },
-        ]}
-      >
+    <View style={styles.metricTile}>
+      <Text style={[styles.metricTileLabel, { fontFamily: mono }]} numberOfLines={2}>
         {label}
       </Text>
-      <Text
-        style={[
-          styles.hudVal,
-          compact && styles.hudValCompact,
-          { fontFamily: MONO as string, color: alert ? '#ff5570' : '#c8ffd8' },
-        ]}
-      >
+      <Text style={[styles.metricTileVal, { fontFamily: mono, color: valColor }]}>
         {value}
         {suffix ? (
-          <Text style={[styles.hudSuf, compact && styles.hudSufCompact, { fontFamily: MONO as string }]}>
-            {' '}
-            {suffix}
-          </Text>
+          <Text style={[styles.metricTileSuf, { fontFamily: mono }]}> {suffix}</Text>
         ) : null}
       </Text>
     </View>
@@ -1037,18 +1125,72 @@ const styles = StyleSheet.create({
   bottomPanel: {
     flexShrink: 0,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#2a2a2a',
-    paddingHorizontal: 14,
-    paddingTop: 10,
-    gap: 10,
+    borderTopColor: '#243028',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    gap: 14,
     backgroundColor: '#000',
   },
-  hudHeaderRow: {
+  hudTopBar: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'flex-end',
+    alignItems: 'center',
     justifyContent: 'space-between',
+    marginBottom: 2,
+  },
+  hudMetricsPanel: {
+    gap: 14,
+  },
+  hudSection: {
     gap: 10,
+  },
+  hudSectionLabel: {
+    color: '#5a7d68',
+    fontSize: 10,
+    letterSpacing: 2.4,
+    textTransform: 'uppercase',
+    opacity: 0.92,
+  },
+  hudMetricRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 10,
+  },
+  metricTile: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 0,
+    minWidth: 74,
+    paddingVertical: 11,
+    paddingHorizontal: 10,
+    borderRadius: 11,
+    backgroundColor: '#060a08',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#1c2f24',
+    // subtle lift
+    shadowColor: '#102218',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.9,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  metricTileLabel: {
+    fontSize: 9,
+    letterSpacing: 0.8,
+    color: '#6d8c7a',
+    marginBottom: 6,
+    lineHeight: 12,
+  },
+  metricTileVal: {
+    fontSize: 17,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+    letterSpacing: 0.2,
+  },
+  metricTileSuf: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#5f7d6c',
+    opacity: 0.85,
   },
   dashboardTools: {
     flexDirection: 'row',
@@ -1083,15 +1225,32 @@ const styles = StyleSheet.create({
   logoCluster: {
     justifyContent: 'flex-start',
   },
-  metricsWrap: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'flex-end',
-    gap: 8,
-    flex: 1,
-  },
   calRow: {
-    alignItems: 'flex-end',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    gap: 12,
+  },
+  resetMaxBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#3a5548',
+    backgroundColor: '#0a1410',
+  },
+  resetMaxBtnDisabled: {
+    opacity: 0.35,
+  },
+  resetMaxBtnPressed: {
+    opacity: 0.88,
+  },
+  resetMaxLabel: {
+    color: '#8a9e94',
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 1.2,
   },
   logo: {
     color: '#5cff9b',
@@ -1106,40 +1265,9 @@ const styles = StyleSheet.create({
     letterSpacing: 1.4,
     marginBottom: 2,
   },
-  hudBlock: {
-    marginBottom: 4,
-  },
-  hudBlockCompact: {
-    marginBottom: 0,
-    minWidth: 68,
-    marginLeft: 4,
-    marginRight: 4,
-  },
-  hudLab: {
-    color: '#7a8a82',
-    fontSize: 10,
-    letterSpacing: 1,
-  },
-  hudLabCompact: {
-    fontSize: 9,
-  },
-  hudVal: {
-    fontSize: 19,
-    fontVariant: ['tabular-nums'],
-  },
-  hudValCompact: {
-    fontSize: 16,
-  },
-  hudSuf: {
-    fontSize: 11,
-    color: '#5e6d66',
-  },
-  hudSufCompact: {
-    fontSize: 9,
-  },
   calBtn: {
-    paddingHorizontal: 22,
-    paddingVertical: 12,
+    paddingHorizontal: 28,
+    paddingVertical: 16,
     borderRadius: 8,
     backgroundColor: '#071a10',
     borderWidth: 1,
@@ -1177,7 +1305,7 @@ const styles = StyleSheet.create({
   },
   calLabel: {
     color: '#6cffb0',
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '700',
     letterSpacing: 2,
   },
