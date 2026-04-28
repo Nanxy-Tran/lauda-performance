@@ -3,7 +3,7 @@ import {
   Gyroscope,
 } from 'expo-sensors';
 import * as Location from 'expo-location';
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Platform,
   Pressable,
@@ -26,20 +26,17 @@ import Animated, {
 import { Canvas, Fill, Path, Skia } from '@shopify/react-native-skia';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-const G_WORLD_Z = 1;
 const BUFFER_LEN = 360;
+const CAL_DURATION_MS = 5000;
+const STABILIZE_MS = 1000;
 
-/** Gravity direction correction (accel vs expected) fused into gyro. */
-const BETA = 0.04;
-
-/** Soft peak decay so readout settles without instantaneous collapse. */
-const PEAK_HOLD_DECAY = 0.997;
-
-const MONO = Platform.select({
-  ios: 'Menlo',
-  android: 'monospace',
-  default: 'monospace',
-});
+/**
+ * expo-sensors accelerometer (g): X lateral (right in portrait), Y longitudinal (toward top of device),
+ * Z vertical (screen normal; ~+1 g screen-up on a table). Gyro uses the same axis pairing.
+ */
+function expoAccelToBikeFrame(ax: number, ay: number, az: number) {
+  return { bx: ax, by: ay, bz: az };
+}
 
 function normalizeQuat(
   qw: number,
@@ -134,8 +131,83 @@ function sliderToAlpha(slider01: number) {
   return 0.02 + Math.min(Math.max(slider01, 0), 1) * 0.42;
 }
 
+/** q ⊗ r — norm inlined so this worklet has no unresolved sibling calls under RN Worklets bundling. */
+function quatMultiplyTuple(
+  aw: number,
+  ax: number,
+  ay: number,
+  az: number,
+  bw: number,
+  bx: number,
+  by: number,
+  bz: number
+): [number, number, number, number] {
+  'worklet';
+  let rw = aw * bw - ax * bx - ay * by - az * bz;
+  let rx = aw * bx + ax * bw + ay * bz - az * by;
+  let ry = aw * by - ax * bz + ay * bw + az * bx;
+  let rz = aw * bz + ax * by - ay * bx + az * bw;
+  let lenSq = rw * rw + rx * rx + ry * ry + rz * rz;
+  if (lenSq < 1e-24) {
+    return [1, 0, 0, 0];
+  }
+  const inv = 1 / Math.sqrt(lenSq);
+  rw *= inv;
+  rx *= inv;
+  ry *= inv;
+  rz *= inv;
+  return [rw, rx, ry, rz];
+}
+
+/** q_rel = q_cal⁻¹ ⊗ q — attitude relative to calibration snapshot (level reference). */
+function relativeQuat(
+  qcw: number,
+  qcx: number,
+  qcy: number,
+  qcz: number,
+  qw: number,
+  qx: number,
+  qy: number,
+  qz: number
+): [number, number, number, number] {
+  'worklet';
+  const icw = qcw;
+  const icx = -qcx;
+  const icy = -qcy;
+  const icz = -qcz;
+  return quatMultiplyTuple(icw, icx, icy, icz, qw, qx, qy, qz);
+}
+
+/** Roll / pitch from world +Z direction in bike body (relative quaternion). Y = longitudinal, Z = vertical. */
+function rollPitchDegFromRelQuat(qw: number, qx: number, qy: number, qz: number) {
+  'worklet';
+  const m = mat3BodyToWorld(qw, qx, qy, qz);
+  const gbx = m.m02;
+  const gby = m.m12;
+  const gbz = m.m22;
+  const rollRad = Math.atan2(gbx, gbz);
+  const pitchRad = Math.atan2(-gby, Math.sqrt(gbx * gbx + gbz * gbz));
+  return {
+    rollDeg: (rollRad * 180) / Math.PI,
+    pitchDeg: (pitchRad * 180) / Math.PI,
+  };
+}
+
+/** Gravity direction correction (accel vs expected) fused into gyro. */
+const BETA = 0.04;
+
+/** Soft peak decay so readout settles without instantaneous collapse. */
+const PEAK_HOLD_DECAY = 0.997;
+
+const MONO = Platform.select({
+  ios: 'Menlo',
+  android: 'monospace',
+  default: 'monospace',
+});
+
 type HudSnap = {
   pitch: number;
+  roll: number;
   peak: number;
   speed: number;
 };
@@ -162,7 +234,20 @@ export default function OscilloscopeView() {
   const z1Sv = useSharedValue(0);
   const z2Sv = useSharedValue(0);
 
-  const calibZ = useSharedValue(0);
+  /** World-Z bias captured from stationary average: Final_Z = (R·a).z − offsetZSv */
+  const offsetZSv = useSharedValue(1);
+
+  /** Attitude snapshot at calibration end for relative pitch / roll HUD. */
+  const qCalW = useSharedValue(1);
+  const qCalX = useSharedValue(0);
+  const qCalY = useSharedValue(0);
+  const qCalZ = useSharedValue(0);
+
+  /** 0 = acquire · plot + EMA, 1 = 5 s cal (no plot / no EMA), 2 = 1 s stabilize (EMA on, plot off). */
+  const dspPhaseSv = useSharedValue(0);
+  /** After first CAL, relative angles are trustworthy. */
+  const hasCalibSv = useSharedValue(0);
+
   const slider01 = useSharedValue(0.35);
 
   const writeIdxSv = useSharedValue(0);
@@ -170,6 +255,7 @@ export default function OscilloscopeView() {
   const sampleTick = useSharedValue(0);
 
   const dspPitchDeg = useSharedValue(0);
+  const dspRollDeg = useSharedValue(0);
   const dspPeakG = useSharedValue(0);
 
   const chartWsv = useSharedValue(Math.max(winW - SIDEBAR, 120));
@@ -177,7 +263,13 @@ export default function OscilloscopeView() {
 
   const speedKmH = useSharedValue(0);
 
-  const [hud, setHud] = useState<HudSnap>({ pitch: 0, peak: 0, speed: 0 });
+  const [hud, setHud] = useState<HudSnap>({ pitch: 0, roll: 0, peak: 0, speed: 0 });
+  const [calUiBanner, setCalUiBanner] = useState<string | null>(null);
+
+  const calibratingSamplingRef = useRef(false);
+  const calAccelSumRef = useRef({ sx: 0, sy: 0, sz: 0, n: 0 });
+  const calTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stabTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const hudFrame = useSharedValue(0);
 
@@ -206,6 +298,13 @@ export default function OscilloscopeView() {
       rawAy.value = y;
       rawAz.value = z;
       sensorTs.value = timestamp && timestamp > 0 ? timestamp : performance.now() / 1000;
+      if (calibratingSamplingRef.current) {
+        const bf = expoAccelToBikeFrame(x, y, z);
+        calAccelSumRef.current.sx += bf.bx;
+        calAccelSumRef.current.sy += bf.by;
+        calAccelSumRef.current.sz += bf.bz;
+        calAccelSumRef.current.n += 1;
+      }
     });
 
     const sg = Gyroscope.addListener(({ x, y, z }) => {
@@ -263,11 +362,15 @@ export default function OscilloscopeView() {
       rawGz.value,
       sensorTs.value,
       slider01.value,
-      calibZ.value,
+      offsetZSv.value,
+      dspPhaseSv.value,
+      qCalW.value,
+      qCalX.value,
+      qCalY.value,
+      qCalZ.value,
+      hasCalibSv.value,
     ],
-    (
-      vals
-    ) => {
+    (vals) => {
       'worklet';
       const ax = vals[0] as number;
       const ay = vals[1] as number;
@@ -277,10 +380,15 @@ export default function OscilloscopeView() {
       const gz = vals[5] as number;
       const ts = vals[6] as number;
       const slid = vals[7] as number;
-      const cz = vals[8] as number;
+      const offsetZ = vals[8] as number;
+      const phase = vals[9] as number;
+      const qcW = vals[10] as number;
+      const qcX = vals[11] as number;
+      const qcY = vals[12] as number;
+      const qcZ = vals[13] as number;
+      const hasCalib = vals[14] as number;
 
-      let dt =
-        ts > 0 && lastTsSv.value > 0 ? ts - lastTsSv.value : 1 / 120;
+      let dt = ts > 0 && lastTsSv.value > 0 ? ts - lastTsSv.value : 1 / 120;
 
       lastTsSv.value = ts > 0 ? ts : lastTsSv.value;
       if (dt <= 0 || dt > 0.25) {
@@ -288,6 +396,13 @@ export default function OscilloscopeView() {
       }
 
       const alpha = sliderToAlpha(slid);
+      /** Bike frame = expo portrait axes (must be inlined — no JS helpers in worklets). */
+      const bx = ax;
+      const by = ay;
+      const bz = az;
+      const wxg = gx;
+      const wyg = gy;
+      const wzg = gz;
 
       let qw = qwSv.value;
       let qx = qxSv.value;
@@ -303,20 +418,20 @@ export default function OscilloscopeView() {
       const m = mat3BodyToWorld(qw, qx, qy, qz);
       const gExp = gravBodyExpected(m);
 
-      const am = Math.sqrt(ax * ax + ay * ay + az * az);
-      let gmx = ax;
-      let gmy = ay;
-      let gmz = az;
+      const am = Math.sqrt(bx * bx + by * by + bz * bz);
+      let gmx = bx;
+      let gmy = by;
+      let gmz = bz;
       if (am > 1e-4) {
-        gmx = ax / am;
-        gmy = ay / am;
-        gmz = az / am;
+        gmx = bx / am;
+        gmy = by / am;
+        gmz = bz / am;
       }
 
       const e = cross(gmx, gmy, gmz, gExp.x, gExp.y, gExp.z);
-      const wx = gx + BETA * e.x;
-      const wy = gy + BETA * e.y;
-      const wz = gz + BETA * e.z;
+      const wx = wxg + BETA * e.x;
+      const wy = wyg + BETA * e.y;
+      const wz = wzg + BETA * e.z;
 
       const [dqw, dqx, dqy, dqz] = quatDerivative(qw, qx, qy, qz, wx, wy, wz);
       qw += dqw * dt;
@@ -329,15 +444,25 @@ export default function OscilloscopeView() {
       qySv.value = fqy;
       qzSv.value = fqz;
 
+      if (phase === 1) {
+        return;
+      }
+
       const m2 = mat3BodyToWorld(fqw, fqx, fqy, fqz);
-      const aw = rotateBodyToWorld(m2, ax, ay, az);
+      const aw = rotateBodyToWorld(m2, bx, by, bz);
       const lx = aw.x;
       const ly = aw.y;
-      const lz = aw.z - G_WORLD_Z;
+      const lz = aw.z - offsetZ;
 
-      const sinp = 2 * (fqw * fqy - fqz * fqx);
-      const pitchRad = Math.asin(Math.min(1, Math.max(-1, sinp)));
-      dspPitchDeg.value = (pitchRad * 180) / Math.PI;
+      if (hasCalib === 1) {
+        const [rqw, rqx, rqy, rqz] = relativeQuat(qcW, qcX, qcY, qcZ, fqw, fqx, fqy, fqz);
+        const rp = rollPitchDegFromRelQuat(rqw, rqx, rqy, rqz);
+        dspPitchDeg.value = rp.pitchDeg;
+        dspRollDeg.value = rp.rollDeg;
+      } else {
+        dspPitchDeg.value = 0;
+        dspRollDeg.value = 0;
+      }
 
       const linMag = Math.sqrt(lx * lx + ly * ly + lz * lz);
       let nextPeak = dspPeakG.value * PEAK_HOLD_DECAY;
@@ -346,21 +471,27 @@ export default function OscilloscopeView() {
       }
       dspPeakG.value = nextPeak;
 
+      const emaOn = phase === 0 || phase === 2;
+      if (!emaOn) {
+        return;
+      }
+
       const inputZ = lz;
       const z1 = alpha * inputZ + (1 - alpha) * z1Sv.value;
       const z2 = alpha * z1 + (1 - alpha) * z2Sv.value;
       z1Sv.value = z1;
       z2Sv.value = z2;
 
-      const display = z2 - cz;
+      if (phase === 0) {
+        const display = z2;
+        const buf = waveData.value;
+        const idx = writeIdxSv.value % BUFFER_LEN;
+        buf[idx] = display;
+        writeIdxSv.value += 1;
+        waveData.value = buf;
 
-      const buf = waveData.value;
-      const idx = writeIdxSv.value % BUFFER_LEN;
-      buf[idx] = display;
-      writeIdxSv.value += 1;
-      waveData.value = buf;
-
-      sampleTick.value += 1;
+        sampleTick.value += 1;
+      }
     }
   );
 
@@ -378,6 +509,7 @@ export default function OscilloscopeView() {
     }
     runOnJS(pushHud)({
       pitch: dspPitchDeg.value,
+      roll: dspRollDeg.value,
       peak: dspPeakG.value,
       speed: speedKmH.value,
     });
@@ -467,12 +599,103 @@ export default function OscilloscopeView() {
     return p;
   });
 
-  const handleCalibrate = useCallback(() => {
-    runOnUI(() => {
-      'worklet';
-      calibZ.value = z2Sv.value;
-    })();
-  }, [calibZ, z2Sv]);
+  const clearCalTimers = useCallback(() => {
+    if (calTimerRef.current) {
+      clearTimeout(calTimerRef.current);
+      calTimerRef.current = null;
+    }
+    if (stabTimerRef.current) {
+      clearTimeout(stabTimerRef.current);
+      stabTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      clearCalTimers();
+    },
+    [clearCalTimers]
+  );
+
+  const finishCalibrationWindow = useCallback(() => {
+    calibratingSamplingRef.current = false;
+    calTimerRef.current = null;
+
+    const { sx, sy, sz, n } = calAccelSumRef.current;
+    if (n < 40) {
+      dspPhaseSv.value = 0;
+      setCalUiBanner(null);
+      return;
+    }
+
+    const avx = sx / n;
+    const avy = sy / n;
+    const avz = sz / n;
+
+    const qw = qwSv.value;
+    const qx = qxSv.value;
+    const qy = qySv.value;
+    const qz = qzSv.value;
+
+    runOnUI(
+      (
+        ax: number,
+        ay: number,
+        az: number,
+        rqw: number,
+        rqx: number,
+        rqy: number,
+        rqz: number
+      ) => {
+        'worklet';
+        const m = mat3BodyToWorld(rqw, rqx, rqy, rqz);
+        const aw = rotateBodyToWorld(m, ax, ay, az);
+        offsetZSv.value = aw.z;
+        qCalW.value = rqw;
+        qCalX.value = rqx;
+        qCalY.value = rqy;
+        qCalZ.value = rqz;
+        z1Sv.value = 0;
+        z2Sv.value = 0;
+        const buf = waveData.value;
+        buf.fill(0);
+        waveData.value = buf;
+        writeIdxSv.value = 0;
+        sampleTick.value = 0;
+        hasCalibSv.value = 1;
+        dspPhaseSv.value = 2;
+      }
+    )(avx, avy, avz, qw, qx, qy, qz);
+
+    setCalUiBanner('STABILIZING…');
+    stabTimerRef.current = setTimeout(() => {
+      runOnUI(() => {
+        'worklet';
+        dspPhaseSv.value = 0;
+      })();
+      stabTimerRef.current = null;
+      setCalUiBanner(null);
+    }, STABILIZE_MS);
+  },
+  // Shared values are read when the timer fires; empty deps keep a stable timer target.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  []
+);
+
+  const startCalibration = useCallback(
+    () => {
+      if (calUiBanner !== null) {
+        return;
+      }
+      clearCalTimers();
+      calAccelSumRef.current = { sx: 0, sy: 0, sz: 0, n: 0 };
+      calibratingSamplingRef.current = true;
+      dspPhaseSv.value = 1;
+      setCalUiBanner('HOLD STILL — CAL 5s');
+      calTimerRef.current = setTimeout(finishCalibrationWindow, CAL_DURATION_MS);
+    },
+    [calUiBanner, clearCalTimers, dspPhaseSv, finishCalibrationWindow]
+  );
 
   const panStartRel = useSharedValue(0);
   const chartColumnW = Math.max(winW - SIDEBAR, 160);
@@ -507,6 +730,12 @@ export default function OscilloscopeView() {
           suffix="deg"
           muted={false}
         />
+        <HudLine
+          label="ROLL"
+          value={`${hud.roll >= 0 ? '+' : ''}${hud.roll.toFixed(1)}`}
+          suffix="deg"
+          muted={false}
+        />
         <HudLine label="PEAK-G" value={hud.peak.toFixed(2)} suffix="" alert />
       </View>
 
@@ -538,13 +767,23 @@ export default function OscilloscopeView() {
             />
           </Canvas>
 
+          {calUiBanner ? (
+            <View style={styles.calBanner} pointerEvents="none">
+              <Text style={[styles.calBannerText, { fontFamily: MONO as string }]}>
+                {calUiBanner}
+              </Text>
+            </View>
+          ) : null}
+
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Calibrate vertical trace"
-            onPress={handleCalibrate}
+            accessibilityLabel="Five second calibration: keep device still on a level surface"
+            disabled={calUiBanner !== null}
+            onPress={startCalibration}
             style={({ pressed }) => [
               styles.calBtn,
               { bottom: insets.bottom + 88, right: 16 },
+              calUiBanner !== null && styles.calBtnDisabled,
               pressed && styles.calBtnPressed,
             ]}
           >
@@ -661,6 +900,23 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#2cff8a',
     overflow: 'visible',
+  },
+  calBtnDisabled: {
+    opacity: 0.35,
+  },
+  calBanner: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    zIndex: 4,
+  },
+  calBannerText: {
+    color: '#9effc5',
+    fontSize: 13,
+    letterSpacing: 1,
+    textAlign: 'center',
+    paddingHorizontal: 12,
   },
   calBtnPressed: {
     opacity: 0.88,
