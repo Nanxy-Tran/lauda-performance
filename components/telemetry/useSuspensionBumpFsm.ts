@@ -5,11 +5,11 @@ import type { FrameInfo, SharedValue } from 'react-native-reanimated';
 /** Same deadzone as OscilloscopeView display pipeline — keep FSM aligned with chart/HUD vert Z. */
 const STATIONARY_DEADZONE_Z_G = 0.04;
 
-export const BUMP_THRESHOLD_G = 0.8;
-export const STABLE_ZONE_G = 0.15;
-export const STABLE_HOLD_MS = 150;
-export const HARSH_PEAK_G = 2.5;
-export const OVERDAMPED_SETTLING_MS = 400;
+export const BUMP_THRESHOLD_G = 0.3;
+export const STABLE_ZONE_G = 0.1;
+export const STABLE_HOLD_MS = 200;
+export const HARSH_PEAK_G = 1.0;
+export const OVERDAMPED_SETTLING_MS = 450;
 
 const ZERO_CROSS_EPS_G = 0.02;
 
@@ -52,18 +52,18 @@ function evaluateDiagnostics(
   'worklet';
   let compressionAdvice: string;
   if (maxPeakZG > HARSH_PEAK_G) {
-    compressionAdvice = 'HARSH IMPACT → Decrease compression (soften)';
+    compressionAdvice = 'HARSH: Reduce Comp. Damping (Turn Softer / -)';
   } else {
-    compressionAdvice = 'Good compression absorption';
+    compressionAdvice = 'COMPRESSION: Good absorption';
   }
 
   let reboundAdvice: string;
   if (bounceCount >= 2) {
-    reboundAdvice = 'UNDERDAMPED (Bouncy) → Increase rebound (stiffen)';
+    reboundAdvice = 'BOUNCY (Too Fast): Add Rebound Damping (Turn Stiffer / +)';
   } else if (settlingDurationMs > OVERDAMPED_SETTLING_MS && bounceCount <= 1) {
-    reboundAdvice = 'OVERDAMPED (Packing/Sluggish) → Decrease rebound (soften)';
+    reboundAdvice = 'PACKING (Too Slow): Reduce Rebound Damping (Turn Softer / -)';
   } else {
-    reboundAdvice = 'IDEAL REBOUND → Stable';
+    reboundAdvice = 'REBOUND: Stable & Ideal';
   }
 
   let surfaceStatus: SuspensionSurfaceStatus;
