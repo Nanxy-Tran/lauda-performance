@@ -1,16 +1,13 @@
 import { Accelerometer } from 'expo-sensors';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import * as Location from 'expo-location';
 import React, {
   useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
-  useRef,
   useState,
 } from 'react';
 import {
-  Alert,
   Platform,
   Pressable,
   StyleSheet,
@@ -32,6 +29,7 @@ import Animated, {
 import { Canvas, Fill, Path, Skia } from '@shopify/react-native-skia';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { GpsTrackLogger } from './GpsTrackLogger';
 import {
   type SuspensionBumpDiagResult,
   type SuspensionSurfaceStatus,
@@ -108,16 +106,6 @@ type HudSnap = {
   peakRollLeft: number;
   peakRollRight: number;
   peakVertZ: number;
-};
-
-/** GPX / heatmap-ready track sample (logged when moving with REC on). */
-export type TrackPoint = {
-  lat: number;
-  lon: number;
-  ele: number;
-  speed: number;
-  maxZ: number;
-  time: string;
 };
 
 function suspensionChipPresentation(surfaceStatus: SuspensionSurfaceStatus): {
@@ -222,16 +210,6 @@ export default function OscilloscopeView() {
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [dashLocked, setDashLocked] = useState(false);
   const [bumpDiag, setBumpDiag] = useState<SuspensionBumpDiagResult | null>(null);
-  const [trackLog, setTrackLog] = useState<TrackPoint[]>([]);
-  const [isLogging, setIsLogging] = useState(false);
-
-  const isLoggingRef = useRef(false);
-  useEffect(() => {
-    isLoggingRef.current = isLogging;
-  }, [isLogging]);
-
-  const trackLogLengthRef = useRef(0);
-  trackLogLengthRef.current = trackLog.length;
 
   const onBumpEventComplete = useCallback((result: SuspensionBumpDiagResult) => {
     setBumpDiag(result);
@@ -273,70 +251,6 @@ export default function OscilloscopeView() {
       sa?.remove?.();
     };
   }, [rawAx, rawAy, rawAz]);
-
-  useEffect(() => {
-    let sub: Location.LocationSubscription | undefined;
-    (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        speedKmH.value = 0;
-        return;
-      }
-      try {
-        sub = await Location.watchPositionAsync(
-          {
-            accuracy: Location.Accuracy.BestForNavigation,
-            timeInterval: 200,
-            distanceInterval: 0,
-          },
-          (loc) => {
-            const speedMs = loc.coords.speed;
-            const s = Math.max(speedMs ?? 0, 0);
-            speedKmH.value = s * 3.6;
-
-            if (!isLoggingRef.current || s <= 0) {
-              return;
-            }
-
-            const lat = loc.coords.latitude;
-            const lon = loc.coords.longitude;
-            if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-              return;
-            }
-
-            const maxZ = dspPeakVertZSv.value;
-            const ele = loc.coords.altitude;
-            const spdKmh = s * 3.6;
-            const timeStr =
-              loc.timestamp != null && loc.timestamp > 0
-                ? new Date(loc.timestamp).toISOString()
-                : new Date().toISOString();
-
-            const point: TrackPoint = {
-              lat,
-              lon,
-              ele: ele != null && Number.isFinite(ele) ? ele : 0,
-              speed: spdKmh,
-              maxZ,
-              time: timeStr,
-            };
-
-            setTrackLog((prev) => [...prev, point]);
-
-            runOnUI(() => {
-              'worklet';
-              dspPeakVertZSv.value = 0;
-            })();
-          }
-        );
-      } catch {
-        speedKmH.value = 0;
-      }
-    })();
-    return () => {
-      void sub?.remove();
-    };
-  }, []);
 
   useEffect(() => {
     if (dashLocked) {
@@ -664,16 +578,6 @@ export default function OscilloscopeView() {
     dspPeakVertZSv,
   ]);
 
-  const toggleTrackLogging = useCallback(() => {
-    setIsLogging((prev) => {
-      if (prev) {
-        Alert.alert('Track stopped', `Array has ${trackLogLengthRef.current} points.`);
-        return false;
-      }
-      return true;
-    });
-  }, []);
-
   const panStartRel = useSharedValue(0);
   const trackW = Math.min(320, Math.max(winW - 48, 140));
 
@@ -840,22 +744,12 @@ export default function OscilloscopeView() {
           </Pressable>
 
           <View style={styles.calRowRight}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={isLogging ? 'Stop GPS track recording' : 'Start GPS track recording'}
-              disabled={dashLocked}
-              onPress={toggleTrackLogging}
-              style={({ pressed }) => [
-                styles.recBtn,
-                dashLocked && styles.recBtnDisabled,
-                isLogging && styles.recBtnOn,
-                pressed && styles.recBtnPressed,
-              ]}
-            >
-              <Text style={[styles.recLabel, { fontFamily: mono }]}>
-                {isLogging ? 'REC ●' : 'REC'}
-              </Text>
-            </Pressable>
+            <GpsTrackLogger
+              speedKmH={speedKmH}
+              dspPeakVertZSv={dspPeakVertZSv}
+              dashLocked={dashLocked}
+              mono={mono}
+            />
 
             <Pressable
               accessibilityRole="button"
@@ -1167,32 +1061,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     letterSpacing: 1.2,
-  },
-  recBtn: {
-    paddingHorizontal: 18,
-    paddingVertical: 16,
-    borderRadius: 8,
-    backgroundColor: '#14080a',
-    borderWidth: 1.5,
-    borderColor: '#ff5c73',
-    minWidth: 84,
-    alignItems: 'center',
-  },
-  recBtnOn: {
-    backgroundColor: '#2a0610',
-    borderColor: '#ff2150',
-  },
-  recBtnDisabled: {
-    opacity: 0.35,
-  },
-  recBtnPressed: {
-    opacity: 0.88,
-  },
-  recLabel: {
-    color: '#ff8fa3',
-    fontSize: 15,
-    fontWeight: '800',
-    letterSpacing: 1.6,
   },
   logo: {
     color: '#5cff9b',
