@@ -2,6 +2,7 @@ import {
   Accelerometer,
   Gyroscope,
 } from 'expo-sensors';
+import Ionicons from '@expo/vector-icons/Ionicons';
 import * as Location from 'expo-location';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -125,11 +126,31 @@ function quatDerivative(
   return [dqw, dqx, dqy, dqz];
 }
 
-/** Slider 0–1 maps to pole α · two identical cascaded one‑poles ⇒ sharp roll‑off above ~ tens of Hz. */
+/** Slider 0–1 maps to pole α ∈ [0.15, 0.20] (two cascaded one‑poles; responsive, still filters engine buzz). */
 function sliderToAlpha(slider01: number) {
   'worklet';
-  return 0.02 + Math.min(Math.max(slider01, 0), 1) * 0.42;
+  const s = Math.min(Math.max(slider01, 0), 1);
+  return 0.15 + s * 0.05;
 }
+
+/** Complementary filter: angle = Kg*(angle + ω*dt) + Ka*accel_angle (anchors to gravity when stationary). */
+const COMP_K_GYRO = 0.98;
+const COMP_K_ACC = 0.02;
+
+/** Above this speed (km/h) we do not apply stationary table lock. */
+const SPEED_TABLE_LOCK_ABOVE_KMH = 1.0;
+/** Stationary if |ω| < this (rad/s). */
+const GYRO_STATIONARY_RAD_S = 0.055;
+
+/** dt clamps: integration stability + avoid duplicate timestamps. */
+const DT_MIN_S = 1 / 800;
+const DT_MAX_S = 0.12;
+
+/** World-Z dead zone after calibration (g). */
+const Z_CLAMP_G = 0.02;
+
+/** Speed below this (km/h) displays as zero. */
+const SPEED_DISPLAY_ZERO_BELOW_KMH = 5;
 
 /** q ⊗ r — norm inlined so this worklet has no unresolved sibling calls under RN Worklets bundling. */
 function quatMultiplyTuple(
@@ -193,6 +214,47 @@ function rollPitchDegFromRelQuat(qw: number, qx: number, qy: number, qz: number)
   };
 }
 
+/** Minimal quaternion rotating body +Z so it aligns with unit vector v (accel-only tilt). */
+function quatAlignZToV(vx: number, vy: number, vz: number): [number, number, number, number] {
+  'worklet';
+  const dot = vz;
+  const cx = -vy;
+  const cy = vx;
+  const cz = 0;
+  const cLenSq = cx * cx + cy * cy;
+  if (cLenSq < 1e-12) {
+    if (dot > 0) {
+      return [1, 0, 0, 0];
+    }
+    return [0, 1, 0, 0];
+  }
+  const cLen = Math.sqrt(cLenSq);
+  const ax = cx / cLen;
+  const ay = cy / cLen;
+  const az = cz / cLen;
+  let ang = Math.atan2(cLen, dot);
+  if (ang > Math.PI * 0.5) {
+    ang -= Math.PI;
+  }
+  const half = ang * 0.5;
+  const sh = Math.sin(half);
+  return [Math.cos(half), ax * sh, ay * sh, az * sh];
+}
+
+/** Roll φ′ · pitch θ′ (rad/s) from body-frame gyro matching rollPitchDegFromRelQuat convention. */
+function eulerRatesRollPitchRad(phi: number, theta: number, gx: number, gy: number, gz: number) {
+  'worklet';
+  const sinP = Math.sin(phi);
+  const cosP = Math.cos(phi);
+  const sinT = Math.sin(theta);
+  const cosT = Math.cos(theta);
+  const cosTAbs = Math.abs(cosT);
+  const tanT = cosTAbs > 1e-3 ? sinT / (cosTAbs > 1e-2 ? cosT : 1e-2 * Math.sign(cosT || 1)) : sinT;
+  const rollDot = gx + gy * sinP * tanT + gz * cosP * tanT;
+  const pitchDot = gy * cosP - gz * sinP;
+  return { rollDot, pitchDot };
+}
+
 /** Gravity direction correction (accel vs expected) fused into gyro. */
 const BETA = 0.04;
 
@@ -216,7 +278,8 @@ export default function OscilloscopeView() {
   const { width: winW, height: winH } = useWindowDimensions();
   const insets = useSafeAreaInsets();
 
-  const SIDEBAR = 118;
+  const chartWsv = useSharedValue(Math.max(winW, 120));
+  const chartHsv = useSharedValue(winH);
 
   const rawAx = useSharedValue(0);
   const rawAy = useSharedValue(0);
@@ -248,23 +311,26 @@ export default function OscilloscopeView() {
   /** After first CAL, relative angles are trustworthy. */
   const hasCalibSv = useSharedValue(0);
 
-  const slider01 = useSharedValue(0.35);
+  const slider01 = useSharedValue(0.5);
 
   const writeIdxSv = useSharedValue(0);
   const waveData = useSharedValue(new Float32Array(BUFFER_LEN));
   const sampleTick = useSharedValue(0);
 
+  /** Complementary filter state (rad), relative to cal — anchored by gravity accel term. */
+  const pitchFusRadSv = useSharedValue(0);
+  const rollFusRadSv = useSharedValue(0);
+
   const dspPitchDeg = useSharedValue(0);
   const dspRollDeg = useSharedValue(0);
   const dspPeakG = useSharedValue(0);
-
-  const chartWsv = useSharedValue(Math.max(winW - SIDEBAR, 120));
-  const chartHsv = useSharedValue(winH);
 
   const speedKmH = useSharedValue(0);
 
   const [hud, setHud] = useState<HudSnap>({ pitch: 0, roll: 0, peak: 0, speed: 0 });
   const [calUiBanner, setCalUiBanner] = useState<string | null>(null);
+  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
+  const [dashLocked, setDashLocked] = useState(false);
 
   const calibratingSamplingRef = useRef(false);
   const calAccelSumRef = useRef({ sx: 0, sy: 0, sz: 0, n: 0 });
@@ -274,9 +340,9 @@ export default function OscilloscopeView() {
   const hudFrame = useSharedValue(0);
 
   useLayoutEffect(() => {
-    chartWsv.value = Math.max(winW - SIDEBAR, 120);
-    chartHsv.value = Math.max(winH - insets.top - insets.bottom - 112, 120);
-  }, [SIDEBAR, winW, winH, insets.top, insets.bottom, chartWsv, chartHsv]);
+    chartWsv.value = Math.max(winW, 120);
+    chartHsv.value = Math.max(winH * 0.52, 140);
+  }, [winW, winH, chartWsv, chartHsv]);
 
   const onChartLayout = useCallback(
     (e: LayoutChangeEvent) => {
@@ -350,6 +416,12 @@ export default function OscilloscopeView() {
     };
   }, [speedKmH]);
 
+  useEffect(() => {
+    if (dashLocked) {
+      setAdvancedSettingsOpen(false);
+    }
+  }, [dashLocked]);
+
   const lastTsSv = useSharedValue(-1);
 
   useAnimatedReaction(
@@ -369,6 +441,7 @@ export default function OscilloscopeView() {
       qCalY.value,
       qCalZ.value,
       hasCalibSv.value,
+      speedKmH.value,
     ],
     (vals) => {
       'worklet';
@@ -387,12 +460,15 @@ export default function OscilloscopeView() {
       const qcY = vals[12] as number;
       const qcZ = vals[13] as number;
       const hasCalib = vals[14] as number;
+      const spdKmh = vals[15] as number;
 
-      let dt = ts > 0 && lastTsSv.value > 0 ? ts - lastTsSv.value : 1 / 120;
-
+      const prevTs = lastTsSv.value;
+      let dt = ts > 0 && prevTs > 0 ? ts - prevTs : 1 / 120;
       lastTsSv.value = ts > 0 ? ts : lastTsSv.value;
-      if (dt <= 0 || dt > 0.25) {
+      if (!(dt > 0) || dt > DT_MAX_S) {
         dt = 1 / 120;
+      } else if (dt < DT_MIN_S) {
+        dt = DT_MIN_S;
       }
 
       const alpha = sliderToAlpha(slid);
@@ -452,14 +528,49 @@ export default function OscilloscopeView() {
       const aw = rotateBodyToWorld(m2, bx, by, bz);
       const lx = aw.x;
       const ly = aw.y;
-      const lz = aw.z - offsetZ;
+      let lz = aw.z - offsetZ;
+      if (Math.abs(lz) < Z_CLAMP_G) {
+        lz = 0;
+      }
 
       if (hasCalib === 1) {
-        const [rqw, rqx, rqy, rqz] = relativeQuat(qcW, qcX, qcY, qcZ, fqw, fqx, fqy, fqz);
-        const rp = rollPitchDegFromRelQuat(rqw, rqx, rqy, rqz);
-        dspPitchDeg.value = rp.pitchDeg;
-        dspRollDeg.value = rp.rollDeg;
+        const gyroMag = Math.sqrt(gx * gx + gy * gy + gz * gz);
+        const tableStill =
+          spdKmh < SPEED_TABLE_LOCK_ABOVE_KMH && gyroMag < GYRO_STATIONARY_RAD_S;
+
+        if (tableStill) {
+          pitchFusRadSv.value = 0;
+          rollFusRadSv.value = 0;
+          dspPitchDeg.value = 0;
+          dspRollDeg.value = 0;
+        } else if (am > 0.15) {
+          const [qaW, qaX, qaY, qaZ] = normalizeQuat(...quatAlignZToV(gmx, gmy, gmz));
+          const [rqAw, rqAx, rqAy, rqAz] = relativeQuat(qcW, qcX, qcY, qcZ, qaW, qaX, qaY, qaZ);
+          const rpAcc = rollPitchDegFromRelQuat(rqAw, rqAx, rqAy, rqAz);
+          const pitchAccRad = (rpAcc.pitchDeg * Math.PI) / 180;
+          const rollAccRad = (rpAcc.rollDeg * Math.PI) / 180;
+
+          const pr = pitchFusRadSv.value;
+          const rr = rollFusRadSv.value;
+          const { rollDot, pitchDot } = eulerRatesRollPitchRad(rr, pr, gx, gy, gz);
+          const pitchPred = pr + pitchDot * dt;
+          const rollPred = rr + rollDot * dt;
+          pitchFusRadSv.value = COMP_K_GYRO * pitchPred + COMP_K_ACC * pitchAccRad;
+          rollFusRadSv.value = COMP_K_GYRO * rollPred + COMP_K_ACC * rollAccRad;
+          dspPitchDeg.value = (pitchFusRadSv.value * 180) / Math.PI;
+          dspRollDeg.value = (rollFusRadSv.value * 180) / Math.PI;
+        } else {
+          const pr = pitchFusRadSv.value;
+          const rr = rollFusRadSv.value;
+          const { rollDot, pitchDot } = eulerRatesRollPitchRad(rr, pr, gx, gy, gz);
+          pitchFusRadSv.value = pr + pitchDot * dt;
+          rollFusRadSv.value = rr + rollDot * dt;
+          dspPitchDeg.value = (pitchFusRadSv.value * 180) / Math.PI;
+          dspRollDeg.value = (rollFusRadSv.value * 180) / Math.PI;
+        }
       } else {
+        pitchFusRadSv.value = 0;
+        rollFusRadSv.value = 0;
         dspPitchDeg.value = 0;
         dspRollDeg.value = 0;
       }
@@ -507,11 +618,12 @@ export default function OscilloscopeView() {
     if (hudFrame.value % 12 !== 0) {
       return;
     }
+    const vKmh = speedKmH.value;
     runOnJS(pushHud)({
       pitch: dspPitchDeg.value,
       roll: dspRollDeg.value,
       peak: dspPeakG.value,
-      speed: speedKmH.value,
+      speed: vKmh < SPEED_DISPLAY_ZERO_BELOW_KMH ? 0 : vKmh,
     });
   }, [pushHud]);
   /* eslint-enable react-hooks/exhaustive-deps */
@@ -637,11 +749,18 @@ export default function OscilloscopeView() {
     const qy = qySv.value;
     const qz = qzSv.value;
 
+    const ix = rawAx.value;
+    const iy = rawAy.value;
+    const iz = rawAz.value;
+
     runOnUI(
       (
         ax: number,
         ay: number,
         az: number,
+        rx: number,
+        ry: number,
+        rz: number,
         rqw: number,
         rqx: number,
         rqy: number,
@@ -655,8 +774,16 @@ export default function OscilloscopeView() {
         qCalX.value = rqx;
         qCalY.value = rqy;
         qCalZ.value = rqz;
-        z1Sv.value = 0;
-        z2Sv.value = 0;
+        /** EMA sync: seed both stages to current linear-Z from instant sample (eliminates post-CAL ramp). */
+        const awInst = rotateBodyToWorld(m, rx, ry, rz);
+        let lzSync = awInst.z - offsetZSv.value;
+        if (Math.abs(lzSync) < Z_CLAMP_G) {
+          lzSync = 0;
+        }
+        z1Sv.value = lzSync;
+        z2Sv.value = lzSync;
+        pitchFusRadSv.value = 0;
+        rollFusRadSv.value = 0;
         const buf = waveData.value;
         buf.fill(0);
         waveData.value = buf;
@@ -665,7 +792,7 @@ export default function OscilloscopeView() {
         hasCalibSv.value = 1;
         dspPhaseSv.value = 2;
       }
-    )(avx, avy, avz, qw, qx, qy, qz);
+    )(avx, avy, avz, ix, iy, iz, qw, qx, qy, qz);
 
     setCalUiBanner('STABILIZING…');
     stabTimerRef.current = setTimeout(() => {
@@ -698,21 +825,27 @@ export default function OscilloscopeView() {
   );
 
   const panStartRel = useSharedValue(0);
-  const chartColumnW = Math.max(winW - SIDEBAR, 160);
-  const trackW = Math.min(300, chartColumnW - 48);
+  const trackW = Math.min(320, Math.max(winW - 48, 140));
 
-  const pan = Gesture.Pan()
-    .onBegin(() => {
-      'worklet';
-      panStartRel.value = slider01.value * trackW;
-    })
-    .onUpdate((evt) => {
-      'worklet';
-      let nx = panStartRel.value + evt.translationX;
-      if (nx < 0) nx = 0;
-      if (nx > trackW) nx = trackW;
-      slider01.value = nx / trackW;
-    });
+  const panAdvancedEnabled = advancedSettingsOpen && !dashLocked;
+
+  const pan = useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(panAdvancedEnabled)
+        .onBegin(() => {
+          'worklet';
+          panStartRel.value = slider01.value * trackW;
+        })
+        .onUpdate((evt) => {
+          'worklet';
+          let nx = panStartRel.value + evt.translationX;
+          if (nx < 0) nx = 0;
+          if (nx > trackW) nx = trackW;
+          slider01.value = nx / trackW;
+        }),
+    [panAdvancedEnabled, panStartRel, slider01, trackW]
+  );
 
   const knobStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: slider01.value * (trackW - 28) }],
@@ -720,69 +853,114 @@ export default function OscilloscopeView() {
 
   return (
     <View style={styles.root}>
-      <View style={[styles.sidebar, { paddingTop: Math.max(insets.top, 8), width: SIDEBAR }]}>
-        <Text style={[styles.logo, { fontFamily: MONO as string }]}>LAUDA</Text>
-        <Text style={[styles.logoSub, { fontFamily: MONO as string }]}>OSC TRACE</Text>
-        <HudLine label="SPD" value={`${hud.speed.toFixed(1)}`} suffix="km/h" muted={false} />
-        <HudLine
-          label="PITCH"
-          value={`${hud.pitch >= 0 ? '+' : ''}${hud.pitch.toFixed(1)}`}
-          suffix="deg"
-          muted={false}
-        />
-        <HudLine
-          label="ROLL"
-          value={`${hud.roll >= 0 ? '+' : ''}${hud.roll.toFixed(1)}`}
-          suffix="deg"
-          muted={false}
-        />
-        <HudLine label="PEAK-G" value={hud.peak.toFixed(2)} suffix="" alert />
+      <View style={styles.chartWrap} onLayout={onChartLayout}>
+        <Canvas style={styles.canvas}>
+          <Fill color="#010101" />
+          <Path style="stroke" path={gridPath} color="#242424" strokeWidth={1} strokeCap="square" />
+          <Path style="stroke" path={baselinePath} color="#173d2f" strokeWidth={1} strokeCap="round" />
+          <Path
+            style="stroke"
+            path={oscilloscopePath}
+            color="#34ff94"
+            strokeWidth={2.25}
+            strokeJoin="round"
+            strokeCap="round"
+          />
+        </Canvas>
+
+        {calUiBanner ? (
+          <View style={styles.calBanner} pointerEvents="none">
+            <Text style={[styles.calBannerText, { fontFamily: MONO as string }]}>{calUiBanner}</Text>
+          </View>
+        ) : null}
       </View>
 
-      <View style={[styles.flexCol]}>
-        <View style={[styles.chartWrap]} onLayout={onChartLayout}>
-          <Canvas style={styles.canvas}>
-            <Fill color="#010101" />
-            <Path
-              style="stroke"
-              path={gridPath}
-              color="#242424"
-              strokeWidth={1}
-              strokeCap="square"
+      <View style={[styles.bottomPanel, { paddingBottom: Math.max(insets.bottom, 10) }]}>
+        <View style={styles.hudHeaderRow}>
+          <View style={styles.logoCluster}>
+            <Text style={[styles.logo, { fontFamily: MONO as string }]}>LAUDA</Text>
+            <Text style={[styles.logoSub, { fontFamily: MONO as string }]}>OSC TRACE</Text>
+          </View>
+          <View style={styles.metricsWrap}>
+            <HudLine label="SPD" value={`${hud.speed.toFixed(1)}`} suffix="km/h" muted={false} compact />
+            <HudLine
+              label="PITCH"
+              value={`${hud.pitch >= 0 ? '+' : ''}${hud.pitch.toFixed(1)}`}
+              suffix="deg"
+              muted={false}
+              compact
             />
-            <Path
-              style="stroke"
-              path={baselinePath}
-              color="#173d2f"
-              strokeWidth={1}
-              strokeCap="round"
+            <HudLine
+              label="ROLL"
+              value={`${hud.roll >= 0 ? '+' : ''}${hud.roll.toFixed(1)}`}
+              suffix="deg"
+              muted={false}
+              compact
             />
-            <Path
-              style="stroke"
-              path={oscilloscopePath}
-              color="#34ff94"
-              strokeWidth={2.25}
-              strokeJoin="round"
-              strokeCap="round"
-            />
-          </Canvas>
+            <HudLine label="PEAK-G" value={hud.peak.toFixed(2)} suffix="" alert compact />
+          </View>
+          <View style={styles.dashboardTools}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={dashLocked ? 'Unlock dashboard controls' : 'Lock dashboard controls'}
+              onPress={() => setDashLocked((v) => !v)}
+              style={({ pressed }) => [styles.toolBtn, pressed && styles.toolBtnPressed]}
+            >
+              <Ionicons
+                name={dashLocked ? 'lock-closed' : 'lock-open-outline'}
+                size={22}
+                color={dashLocked ? '#5cff9b' : '#6b7a72'}
+              />
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Toggle advanced filter settings"
+              disabled={dashLocked}
+              onPress={() => !dashLocked && setAdvancedSettingsOpen((v) => !v)}
+              style={({ pressed }) => [
+                styles.toolBtn,
+                dashLocked && styles.toolBtnDisabled,
+                pressed && styles.toolBtnPressed,
+              ]}
+            >
+              <Ionicons
+                name="settings-outline"
+                size={22}
+                color={dashLocked ? '#3a453f' : '#6b7a72'}
+              />
+            </Pressable>
+          </View>
+        </View>
 
-          {calUiBanner ? (
-            <View style={styles.calBanner} pointerEvents="none">
-              <Text style={[styles.calBannerText, { fontFamily: MONO as string }]}>
-                {calUiBanner}
-              </Text>
+        {advancedSettingsOpen && !dashLocked ? (
+          <View style={styles.advancedPanel}>
+            <Text style={[styles.advancedTitle, { fontFamily: MONO as string }]}>ADVANCED · FILTER α</Text>
+            <View style={styles.sensRow}>
+              <Text style={[styles.sensLabel, { fontFamily: MONO as string }]}>FILTER α</Text>
+              <GestureDetector gesture={pan}>
+                <View style={[styles.track, { width: trackW }]}>
+                  <View style={styles.trackFill} />
+                  <Animated.View style={[styles.thumb, knobStyle]} />
+                </View>
+              </GestureDetector>
             </View>
-          ) : null}
+          </View>
+        ) : null}
 
+        <View style={styles.calRow}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Five second calibration: keep device still on a level surface"
+            accessibilityLabel="Five second calibration: keep device still on a level surface. Long press to open filter settings."
             disabled={calUiBanner !== null}
             onPress={startCalibration}
+            onLongPress={() => {
+              if (!dashLocked) {
+                setAdvancedSettingsOpen(true);
+              }
+            }}
+            delayLongPress={450}
             style={({ pressed }) => [
               styles.calBtn,
-              { bottom: insets.bottom + 88, right: 16 },
               calUiBanner !== null && styles.calBtnDisabled,
               pressed && styles.calBtnPressed,
             ]}
@@ -790,16 +968,6 @@ export default function OscilloscopeView() {
             <View pointerEvents="none" style={styles.calGlow} />
             <Text style={[styles.calLabel, { fontFamily: MONO as string }]}>CAL</Text>
           </Pressable>
-        </View>
-
-        <View style={[styles.sensRow, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-          <Text style={[styles.sensLabel, { fontFamily: MONO as string }]}>FILTER α</Text>
-          <GestureDetector gesture={pan}>
-            <View style={[styles.track, { width: trackW }]}>
-              <View style={styles.trackFill} />
-              <Animated.View style={[styles.thumb, knobStyle]} />
-            </View>
-          </GestureDetector>
         </View>
       </View>
     </View>
@@ -812,27 +980,39 @@ function HudLine({
   suffix,
   muted,
   alert,
+  compact,
 }: {
   label: string;
   value: string;
   suffix: string;
   muted?: boolean;
   alert?: boolean;
+  compact?: boolean;
 }) {
   return (
-    <View style={styles.hudBlock}>
-      <Text style={[styles.hudLab, { fontFamily: MONO as string, opacity: muted ? 0.45 : 0.75 }]}>
+    <View style={[styles.hudBlock, compact && styles.hudBlockCompact]}>
+      <Text
+        style={[
+          styles.hudLab,
+          compact && styles.hudLabCompact,
+          { fontFamily: MONO as string, opacity: muted ? 0.45 : 0.75 },
+        ]}
+      >
         {label}
       </Text>
       <Text
         style={[
           styles.hudVal,
+          compact && styles.hudValCompact,
           { fontFamily: MONO as string, color: alert ? '#ff5570' : '#c8ffd8' },
         ]}
       >
         {value}
         {suffix ? (
-          <Text style={[styles.hudSuf, { fontFamily: MONO as string }]}> {suffix}</Text>
+          <Text style={[styles.hudSuf, compact && styles.hudSufCompact, { fontFamily: MONO as string }]}>
+            {' '}
+            {suffix}
+          </Text>
         ) : null}
       </Text>
     </View>
@@ -842,58 +1022,123 @@ function HudLine({
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    flexDirection: 'row',
+    flexDirection: 'column',
     backgroundColor: '#000',
-  },
-  flexCol: { flex: 1 },
-  sidebar: {
-    borderRightWidth: StyleSheet.hairlineWidth,
-    borderRightColor: '#2a2a2a',
-    paddingHorizontal: 10,
-    paddingBottom: 8,
-    gap: 10,
-    justifyContent: 'flex-start',
-  },
-  logo: {
-    color: '#5cff9b',
-    fontSize: 16,
-    letterSpacing: 2,
-    fontWeight: '700',
-    marginBottom: -2,
-  },
-  logoSub: {
-    color: '#5a6b63',
-    fontSize: 9,
-    letterSpacing: 1.4,
-    marginBottom: 10,
-  },
-  hudBlock: {
-    marginBottom: 4,
-  },
-  hudLab: {
-    color: '#7a8a82',
-    fontSize: 10,
-    letterSpacing: 1,
-  },
-  hudVal: {
-    fontSize: 19,
-    fontVariant: ['tabular-nums'],
-  },
-  hudSuf: {
-    fontSize: 11,
-    color: '#5e6d66',
   },
   chartWrap: {
     flex: 1,
+    minHeight: 200,
     position: 'relative',
   },
   canvas: {
     flex: 1,
     backgroundColor: '#000',
   },
+  bottomPanel: {
+    flexShrink: 0,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#2a2a2a',
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    gap: 10,
+    backgroundColor: '#000',
+  },
+  hudHeaderRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  dashboardTools: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    flexShrink: 0,
+  },
+  toolBtn: {
+    padding: 6,
+    borderRadius: 6,
+  },
+  toolBtnPressed: {
+    opacity: 0.75,
+  },
+  toolBtnDisabled: {
+    opacity: 0.35,
+  },
+  advancedPanel: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#2a3330',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 6,
+    backgroundColor: '#050805',
+  },
+  advancedTitle: {
+    color: '#5e6d66',
+    fontSize: 10,
+    letterSpacing: 1.2,
+  },
+  logoCluster: {
+    justifyContent: 'flex-start',
+  },
+  metricsWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
+    gap: 8,
+    flex: 1,
+  },
+  calRow: {
+    alignItems: 'flex-end',
+  },
+  logo: {
+    color: '#5cff9b',
+    fontSize: 15,
+    letterSpacing: 2,
+    fontWeight: '700',
+    marginBottom: -2,
+  },
+  logoSub: {
+    color: '#5a6b63',
+    fontSize: 8,
+    letterSpacing: 1.4,
+    marginBottom: 2,
+  },
+  hudBlock: {
+    marginBottom: 4,
+  },
+  hudBlockCompact: {
+    marginBottom: 0,
+    minWidth: 68,
+    marginLeft: 4,
+    marginRight: 4,
+  },
+  hudLab: {
+    color: '#7a8a82',
+    fontSize: 10,
+    letterSpacing: 1,
+  },
+  hudLabCompact: {
+    fontSize: 9,
+  },
+  hudVal: {
+    fontSize: 19,
+    fontVariant: ['tabular-nums'],
+  },
+  hudValCompact: {
+    fontSize: 16,
+  },
+  hudSuf: {
+    fontSize: 11,
+    color: '#5e6d66',
+  },
+  hudSufCompact: {
+    fontSize: 9,
+  },
   calBtn: {
-    position: 'absolute',
-    paddingHorizontal: 18,
+    paddingHorizontal: 22,
     paddingVertical: 12,
     borderRadius: 8,
     backgroundColor: '#071a10',
@@ -937,14 +1182,10 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
   },
   sensRow: {
-    paddingHorizontal: 16,
-    paddingTop: 8,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#1c1c1c',
-    backgroundColor: '#000',
+    paddingTop: 4,
   },
   sensLabel: {
     color: '#6b7a72',
