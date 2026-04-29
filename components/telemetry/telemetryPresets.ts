@@ -22,7 +22,7 @@ export const HIGH_SPEED_IMPACT_PRESET: PresetConfig = {
  */
 export const SMOOTH_SURFACE_PRESET: PresetConfig = {
   alpha: 0.2,
-  multiplier: 8.0,
+  multiplier: 5.0,
   threshold: 0.1,
   stableZone: 0.08,
   name: 'Smooth & Micro',

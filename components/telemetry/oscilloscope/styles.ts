@@ -317,4 +317,60 @@ export const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 2,
   },
+  hfTelemetryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    gap: 10,
+    paddingBottom: 8,
+  },
+  hfJsonRecBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderRadius: 8,
+    backgroundColor: '#14080a',
+    borderWidth: 1.5,
+    borderColor: '#aa4460',
+    minWidth: 100,
+    alignItems: 'center',
+  },
+  hfJsonRecBtnOn: {
+    backgroundColor: '#2a0610',
+    borderColor: '#ff2150',
+  },
+  hfJsonRecBtnDisabled: {
+    opacity: 0.35,
+  },
+  hfJsonRecBtnPressed: {
+    opacity: 0.88,
+  },
+  hfJsonRecLabel: {
+    color: '#ff9aad',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+  },
+  hfJsonExportBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 14,
+    borderRadius: 8,
+    backgroundColor: '#0a1210',
+    borderWidth: 1,
+    borderColor: '#5a8cff',
+    minWidth: 100,
+    alignItems: 'center',
+  },
+  hfJsonExportBtnDisabled: {
+    opacity: 0.35,
+  },
+  hfJsonExportBtnPressed: {
+    opacity: 0.88,
+  },
+  hfJsonExportLabel: {
+    color: '#9ec5ff',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
 });

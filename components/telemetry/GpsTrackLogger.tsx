@@ -1,10 +1,16 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import {
+  activateKeepAwakeAsync,
+  deactivateKeepAwake,
+} from 'expo-keep-awake';
 import * as Location from 'expo-location';
 import * as Sharing from 'expo-sharing';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text } from 'react-native';
 import { runOnUI } from 'react-native-reanimated';
 import type { SharedValue } from 'react-native-reanimated';
+
+const KEEP_AWAKE_TAG_GPS_REC = 'LaudaPerformanceGpsRec';
 
 /** GPX / heatmap-ready track sample (logged when moving with REC on). */
 export type TrackPoint = {
@@ -13,23 +19,47 @@ export type TrackPoint = {
   ele: number;
   speed: number;
   maxZ: number;
+  /** Motorcycle lean angle (deg), instantaneous from accel HUD pipeline. */
+  roll: number;
+  /** Motorcycle pitch angle (deg), instantaneous from accel HUD pipeline. */
+  pitch: number;
   time: string;
 };
 
 export type GpsTrackLoggerProps = {
   speedKmH: SharedValue<number>;
   dspPeakVertZSv: SharedValue<number>;
+  dspPitchDeg: SharedValue<number>;
+  dspRollDeg: SharedValue<number>;
   dashLocked: boolean;
   mono: string;
 };
 
-export function GpsTrackLogger({ speedKmH, dspPeakVertZSv, dashLocked, mono }: GpsTrackLoggerProps) {
+export function GpsTrackLogger({
+  speedKmH,
+  dspPeakVertZSv,
+  dspPitchDeg,
+  dspRollDeg,
+  dashLocked,
+  mono,
+}: GpsTrackLoggerProps) {
   const [trackLog, setTrackLog] = useState<TrackPoint[]>([]);
   const [isLogging, setIsLogging] = useState(false);
 
   const isLoggingRef = useRef(false);
   useEffect(() => {
     isLoggingRef.current = isLogging;
+  }, [isLogging]);
+
+  /** While recording: keep screen awake — reduces OEM sleep/dim stalls that stall GPS/UI updates while still foregrounded. */
+  useEffect(() => {
+    if (isLogging) {
+      void activateKeepAwakeAsync(KEEP_AWAKE_TAG_GPS_REC);
+      return () => {
+        void deactivateKeepAwake(KEEP_AWAKE_TAG_GPS_REC);
+      };
+    }
+    void deactivateKeepAwake(KEEP_AWAKE_TAG_GPS_REC);
   }, [isLogging]);
 
   const trackLogLengthRef = useRef(0);
@@ -47,7 +77,7 @@ export function GpsTrackLogger({ speedKmH, dspPeakVertZSv, dashLocked, mono }: G
         sub = await Location.watchPositionAsync(
           {
             accuracy: Location.Accuracy.BestForNavigation,
-            timeInterval: 200,
+            timeInterval: 100,
             distanceInterval: 0,
           },
           (loc) => {
@@ -66,6 +96,8 @@ export function GpsTrackLogger({ speedKmH, dspPeakVertZSv, dashLocked, mono }: G
             }
 
             const maxZ = dspPeakVertZSv.value;
+            const roll = dspRollDeg.value;
+            const pitch = dspPitchDeg.value;
             const ele = loc.coords.altitude;
             const spdKmh = s * 3.6;
             const timeStr =
@@ -79,6 +111,8 @@ export function GpsTrackLogger({ speedKmH, dspPeakVertZSv, dashLocked, mono }: G
               ele: ele != null && Number.isFinite(ele) ? ele : 0,
               speed: spdKmh,
               maxZ,
+              roll,
+              pitch,
               time: timeStr,
             };
 
@@ -97,7 +131,7 @@ export function GpsTrackLogger({ speedKmH, dspPeakVertZSv, dashLocked, mono }: G
     return () => {
       void sub?.remove();
     };
-  }, [dspPeakVertZSv, speedKmH]);
+  }, [dspPeakVertZSv, dspPitchDeg, dspRollDeg, speedKmH]);
 
   const toggleTrackLogging = useCallback(() => {
     setIsLogging((prev) => {
@@ -121,7 +155,7 @@ export function GpsTrackLogger({ speedKmH, dspPeakVertZSv, dashLocked, mono }: G
       gpxString += `      <trkpt lat="${pt.lat}" lon="${pt.lon}">\n`;
       gpxString += `        <ele>${pt.ele}</ele>\n`;
       gpxString += `        <time>${pt.time}</time>\n`;
-      gpxString += `        <extensions>\n          <speed>${pt.speed}</speed>\n          <maxZ>${pt.maxZ.toFixed(3)}</maxZ>\n        </extensions>\n`;
+      gpxString += `        <extensions>\n          <speed>${pt.speed}</speed>\n          <maxZ>${pt.maxZ.toFixed(3)}</maxZ>\n          <roll>${pt.roll.toFixed(1)}</roll>\n          <pitch>${pt.pitch.toFixed(1)}</pitch>\n        </extensions>\n`;
       gpxString += `      </trkpt>\n`;
     });
 

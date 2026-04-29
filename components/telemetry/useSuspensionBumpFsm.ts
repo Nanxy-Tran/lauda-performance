@@ -2,9 +2,6 @@ import { useCallback, useMemo, useRef } from 'react';
 import { runOnJS, runOnUI, useFrameCallback, useSharedValue } from 'react-native-reanimated';
 import type { FrameInfo, SharedValue } from 'react-native-reanimated';
 
-/** Same deadzone as OscilloscopeView display pipeline — keep FSM aligned with chart/HUD vert Z. */
-const STATIONARY_DEADZONE_Z_G = 0.04;
-
 /** Internal FSM states (UI-thread only). */
 const FSM_IDLE = 0;
 const FSM_IMPACT = 1;
@@ -12,12 +9,6 @@ const FSM_SETTLING = 2;
 
 /** Max time in SETTLING before abandoning without dispatch (avoids stuck state). */
 const SETTLING_ABORT_MS = 12000;
-
-function displayVertZWorklet(zRaw: number): number {
-  'worklet';
-  const z = zRaw;
-  return Math.abs(z) < STATIONARY_DEADZONE_Z_G ? 0 : z;
-}
 
 export type SuspensionSurfaceStatus =
   | 'HARSH_IMPACT'
@@ -132,7 +123,7 @@ export function useSuspensionBumpFsm({
       const overMs = overdampedSettlingMs.value;
       const zxEps = zeroCrossEpsG.value;
 
-      const z = displayVertZWorklet(vertZ.value);
+      const z = vertZ.value;
       const t = frame.timestamp;
       const dt = frame.timeSincePreviousFrame;
       const deltaMs = dt != null && dt > 0 && dt < 200 ? dt : 1000 / 60;

@@ -1,5 +1,8 @@
-import React, { useCallback, useState } from 'react';
-import { useWindowDimensions, View } from 'react-native';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
+import React, { useCallback, useRef, useState } from 'react';
+import { Alert, useWindowDimensions, View } from 'react-native';
+import { useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
@@ -39,6 +42,55 @@ export default function OscilloscopeView() {
     vertFastAlphaSv,
     sensitivityMultiplierSv,
   } = sv;
+
+  const hfLogRef = useRef<any[]>([]);
+  const isHfLoggingSv = useSharedValue(0);
+  const [isHfLogging, setIsHfLogging] = useState(false);
+
+  const appendHfData = useCallback((z: number, pitch: number, roll: number, speed: number) => {
+    hfLogRef.current.push({
+      t: Date.now(),
+      z: Number(z.toFixed(3)),
+      p: Number(pitch.toFixed(1)),
+      r: Number(roll.toFixed(1)),
+      s: Number(speed.toFixed(1)),
+    });
+  }, []);
+
+  const toggleHfLog = useCallback(() => {
+    setIsHfLogging((prev) => {
+      const turningOn = !prev;
+      if (turningOn) {
+        hfLogRef.current = [];
+        isHfLoggingSv.value = 1;
+      } else {
+        isHfLoggingSv.value = 0;
+      }
+      return turningOn;
+    });
+  }, [isHfLoggingSv]);
+
+  const exportToJSON = useCallback(async () => {
+    if (hfLogRef.current.length === 0) {
+      Alert.alert('No HF telemetry to export');
+      return;
+    }
+    const jsonStr = JSON.stringify(hfLogRef.current);
+    const baseUri = FileSystem.documentDirectory;
+    if (!baseUri) {
+      Alert.alert('Export failed', 'Documents directory unavailable.');
+      return;
+    }
+    const uri = `${baseUri}Lauda_HF_${Date.now()}.json`;
+    try {
+      await FileSystem.writeAsStringAsync(uri, jsonStr, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      await Sharing.shareAsync(uri);
+    } catch (e) {
+      Alert.alert('Export failed', e instanceof Error ? e.message : 'Could not write or share.');
+    }
+  }, []);
 
   const [calUiBanner, setCalUiBanner] = useState<string | null>(null);
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
@@ -85,7 +137,9 @@ export default function OscilloscopeView() {
     winH,
     dashLocked,
     setAdvancedSettingsOpen,
-    sv
+    sv,
+    isHfLoggingSv,
+    appendHfData
   );
 
   const { instantCalibrate, resetPeakMax } = useOscilloscopeCalibration({
@@ -124,6 +178,9 @@ export default function OscilloscopeView() {
         calUiBanner={calUiBanner}
         resetPeakMax={resetPeakMax}
         instantCalibrate={instantCalibrate}
+        isHfLogging={isHfLogging}
+        toggleHfLog={toggleHfLog}
+        exportToJSON={exportToJSON}
       />
     </View>
   );

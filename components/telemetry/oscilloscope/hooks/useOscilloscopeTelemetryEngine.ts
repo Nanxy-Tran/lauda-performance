@@ -8,6 +8,7 @@ import {
   useDerivedValue,
   useFrameCallback,
   useSharedValue,
+  type SharedValue,
 } from 'react-native-reanimated';
 import { Skia } from '@shopify/react-native-skia';
 
@@ -62,7 +63,9 @@ export function useOscilloscopeTelemetryEngine(
   winH: number,
   dashLocked: boolean,
   setAdvancedSettingsOpen: Dispatch<SetStateAction<boolean>>,
-  sv: OscilloscopeSharedValues
+  sv: OscilloscopeSharedValues,
+  isHfLoggingSv: SharedValue<number>,
+  appendHfData: (z: number, pitch: number, roll: number, speed: number) => void
 ) {
   const [hud, setHud] = useState<HudSnap>({
     pitch: 0,
@@ -153,7 +156,8 @@ export function useOscilloscopeTelemetryEngine(
       const vert_z_raw = z_total - 1.0;
       cleanVertZSv.value = va * vert_z_raw + (1 - va) * cleanVertZSv.value;
 
-      const chartSample = displayWorldZG(cleanVertZSv.value);
+      /** Raw LPF output for waveform (no stationary deadzone). */
+      const chartSample = cleanVertZSv.value;
 
       peakFifo3Sv.value = peakFifo2Sv.value;
       peakFifo2Sv.value = peakFifo1Sv.value;
@@ -207,8 +211,12 @@ export function useOscilloscopeTelemetryEngine(
       writeIdxSv.value += 1;
       waveData.value = buf;
 
-      hudDisplayZSv.value = chartSample;
+      hudDisplayZSv.value = displayWorldZG(cleanVertZSv.value);
       sampleTick.value += 1;
+
+      if (isHfLoggingSv.value === 1) {
+        runOnJS(appendHfData)(cleanVertZSv.value, dspPitchDeg.value, dspRollDeg.value, speedKmH.value);
+      }
     }
   );
 

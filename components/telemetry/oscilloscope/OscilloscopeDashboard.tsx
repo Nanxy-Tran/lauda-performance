@@ -37,6 +37,10 @@ export type OscilloscopeDashboardProps = {
   calUiBanner: string | null;
   resetPeakMax: () => void;
   instantCalibrate: () => void;
+
+  isHfLogging: boolean;
+  toggleHfLog: () => void;
+  exportToJSON: () => void;
 };
 
 export function OscilloscopeDashboard({
@@ -57,6 +61,9 @@ export function OscilloscopeDashboard({
   calUiBanner,
   resetPeakMax,
   instantCalibrate,
+  isHfLogging,
+  toggleHfLog,
+  exportToJSON,
 }: OscilloscopeDashboardProps) {
   const {
     speedKmH,
@@ -69,6 +76,8 @@ export function OscilloscopeDashboard({
     overdampedSettlingMssv,
     zeroCrossEpsGsv,
     dspPeakVertZSv,
+    dspPitchDeg,
+    dspRollDeg,
   } = sv;
 
   return (
@@ -242,7 +251,14 @@ export function OscilloscopeDashboard({
         >
           <Text style={[styles.resetMaxLabel, { fontFamily: mono }]}>RESET MAX</Text>
         </Pressable>
-        <GpsTrackLogger speedKmH={speedKmH} dspPeakVertZSv={dspPeakVertZSv} dashLocked={dashLocked} mono={mono} />
+        <GpsTrackLogger
+          speedKmH={speedKmH}
+          dspPeakVertZSv={dspPeakVertZSv}
+          dspPitchDeg={dspPitchDeg}
+          dspRollDeg={dspRollDeg}
+          dashLocked={dashLocked}
+          mono={mono}
+        />
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Instant calibration: snap vertical axis to zero using current gravity. Long press to open filter settings."
@@ -253,6 +269,38 @@ export function OscilloscopeDashboard({
         >
           <View pointerEvents="none" style={styles.calGlow} />
           <Text style={[styles.calLabel, { fontFamily: mono }]}>CAL</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.hfTelemetryRow}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={isHfLogging ? 'Stop high-frequency JSON telemetry' : 'Start high-frequency JSON telemetry'}
+          disabled={dashLocked}
+          onPress={toggleHfLog}
+          style={({ pressed }) => [
+            styles.hfJsonRecBtn,
+            dashLocked && styles.hfJsonRecBtnDisabled,
+            isHfLogging && styles.hfJsonRecBtnOn,
+            pressed && styles.hfJsonRecBtnPressed,
+          ]}
+        >
+          <Text style={[styles.hfJsonRecLabel, { fontFamily: mono }]}>{isHfLogging ? 'REC JSON ●' : 'REC JSON'}</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Export HF telemetry JSON"
+          disabled={isHfLogging || dashLocked}
+          onPress={() => {
+            void exportToJSON();
+          }}
+          style={({ pressed }) => [
+            styles.hfJsonExportBtn,
+            (isHfLogging || dashLocked) && styles.hfJsonExportBtnDisabled,
+            pressed && styles.hfJsonExportBtnPressed,
+          ]}
+        >
+          <Text style={[styles.hfJsonExportLabel, { fontFamily: mono }]}>EXP JSON</Text>
         </Pressable>
       </View>
     </ScrollView>
