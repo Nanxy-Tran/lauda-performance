@@ -2,6 +2,8 @@ import { useCallback, useMemo, useRef } from 'react';
 import { runOnJS, runOnUI, useFrameCallback, useSharedValue } from 'react-native-reanimated';
 import type { FrameInfo, SharedValue } from 'react-native-reanimated';
 
+import { WHEELBASE_M } from './oscilloscope/dspConstants';
+
 /** Internal FSM states (UI-thread only). */
 const FSM_IDLE = 0;
 const FSM_IMPACT = 1;
@@ -76,12 +78,16 @@ export type UseSuspensionBumpFsmParams = {
   harshPeakG: SharedValue<number>;
   overdampedSettlingMs: SharedValue<number>;
   zeroCrossEpsG: SharedValue<number>;
+  /** Vehicle speed (km/h) for front→rear propagation deadzone during SETTLING. */
+  speedKmH: SharedValue<number>;
 };
 
 /**
  * Core suspension bump FSM: runs on the UI thread via `useFrameCallback`, reads `vertZ` every frame,
  * and invokes `onBumpComplete` **once** per completed bump (via `runOnJS`).
  * Thresholds are SharedValues so they can be tuned live from the UI.
+ *
+ * `impactStartMsSv` is wall-clock (`Date.now()`), shared with the oscilloscope for dual-trace windows.
  */
 export function useSuspensionBumpFsm({
   vertZ,
@@ -93,7 +99,11 @@ export function useSuspensionBumpFsm({
   harshPeakG,
   overdampedSettlingMs,
   zeroCrossEpsG,
-}: UseSuspensionBumpFsmParams): { resetBumpFsm: () => void } {
+  speedKmH,
+}: UseSuspensionBumpFsmParams): {
+  resetBumpFsm: () => void;
+  impactStartMsSv: SharedValue<number>;
+} {
   const onBumpCompleteRef = useRef(onBumpComplete);
   onBumpCompleteRef.current = onBumpComplete;
 
@@ -124,7 +134,7 @@ export function useSuspensionBumpFsm({
       const zxEps = zeroCrossEpsG.value;
 
       const z = vertZ.value;
-      const t = frame.timestamp;
+      const wallMs = Date.now();
       const dt = frame.timeSincePreviousFrame;
       const deltaMs = dt != null && dt > 0 && dt < 200 ? dt : 1000 / 60;
 
@@ -134,7 +144,7 @@ export function useSuspensionBumpFsm({
       if (state === FSM_IDLE) {
         if (absZ > bumpTh) {
           fsmStateSv.value = FSM_IMPACT;
-          impactStartMsSv.value = t;
+          impactStartMsSv.value = wallMs;
           maxPeakZSv.value = absZ;
           stableAccumMsSv.value = 0;
         }
@@ -147,7 +157,7 @@ export function useSuspensionBumpFsm({
         }
         if (absZ < bumpTh) {
           fsmStateSv.value = FSM_SETTLING;
-          settlingStartMsSv.value = t;
+          settlingStartMsSv.value = wallMs;
           bounceCountSv.value = 0;
           prevZSv.value = z;
           stableAccumMsSv.value = 0;
@@ -170,7 +180,7 @@ export function useSuspensionBumpFsm({
 
       const settlingStart = settlingStartMsSv.value;
 
-      if (t - settlingStart > SETTLING_ABORT_MS) {
+      if (wallMs - settlingStart > SETTLING_ABORT_MS) {
         fsmStateSv.value = FSM_IDLE;
         maxPeakZSv.value = 0;
         bounceCountSv.value = 0;
@@ -178,8 +188,15 @@ export function useSuspensionBumpFsm({
         return;
       }
 
-      if (stableAccumMsSv.value >= holdMs) {
-        const settlingDurationMs = t - settlingStart;
+      const cms = speedKmH.value / 3.6;
+      let rearHitDelayMs;
+      rearHitDelayMs = (WHEELBASE_M / cms) * 1000;
+
+      const isForcedByRearHit = wallMs - impactStartMsSv.value >= rearHitDelayMs - 20;
+      const isStableByConfig = stableAccumMsSv.value >= holdMs;
+
+      if (isStableByConfig || isForcedByRearHit) {
+        const settlingDurationMs = wallMs - settlingStart;
         const peak = maxPeakZSv.value;
         const bounces = bounceCountSv.value;
         const impactStart = impactStartMsSv.value;
@@ -213,6 +230,7 @@ export function useSuspensionBumpFsm({
     harshPeakG,
     overdampedSettlingMs,
     zeroCrossEpsG,
+    speedKmH,
   ]);
 
   useFrameCallback(bumpWorklet);
@@ -238,5 +256,5 @@ export function useSuspensionBumpFsm({
     stableAccumMsSv,
   ]);
 
-  return { resetBumpFsm };
+  return { resetBumpFsm, impactStartMsSv };
 }

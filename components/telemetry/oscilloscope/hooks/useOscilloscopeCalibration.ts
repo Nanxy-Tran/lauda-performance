@@ -5,6 +5,7 @@ import { runOnUI } from 'react-native-reanimated';
 import type { SuspensionBumpDiagResult } from '../../useSuspensionBumpFsm';
 
 import { accelPitchRollDegAbsolute, displayWorldZG } from '../sensorMath';
+import { KALMAN_P0 } from '../dspConstants';
 import type { OscilloscopeSharedValues } from './useOscilloscopeSharedValues';
 
 type CalibrationParams = {
@@ -23,6 +24,11 @@ export function useOscilloscopeCalibration({ sv, resetBumpFsm, setBumpDiag, setC
     gravUnitY,
     gravUnitZ,
     cleanVertZSv,
+    vertUserLpSv,
+    dspDriftLpSv,
+    dspRoadLpfSv,
+    dspKalmanXSv,
+    dspKalmanPSv,
     hasCalibSv,
     dspPeakG,
     peakFifo0Sv,
@@ -42,10 +48,18 @@ export function useOscilloscopeCalibration({ sv, resetBumpFsm, setBumpDiag, setC
     writeIdxSv,
     sampleTick,
     hudDisplayZSv,
+    lastAccelSampleWallMsSv,
+    terrainKindSv,
+    terrainSbStateSv,
+    terrainSbPeakTimeSv,
+    terrainPhStateSv,
+    terrainPhPeakTimeSv,
+    terrainFlashStartSv,
+    terrainOverlayOpacitySv,
   } = sv;
 
   const flashCalBanner = useCallback(() => {
-    setCalUiBanner('CAL · Z zero');
+    setCalUiBanner('Calibrating · Z on zero');
     setTimeout(() => setCalUiBanner(null), 450);
   }, []);
 
@@ -64,6 +78,19 @@ export function useOscilloscopeCalibration({ sv, resetBumpFsm, setBumpDiag, setC
       }
 
       cleanVertZSv.value = 0;
+      vertUserLpSv.value = 0;
+      dspDriftLpSv.value = 0;
+      dspRoadLpfSv.value = 0;
+      dspKalmanXSv.value = 0;
+      dspKalmanPSv.value = KALMAN_P0;
+      lastAccelSampleWallMsSv.value = 0;
+      terrainKindSv.value = 0;
+      terrainSbStateSv.value = 0;
+      terrainSbPeakTimeSv.value = 0;
+      terrainPhStateSv.value = 0;
+      terrainPhPeakTimeSv.value = 0;
+      terrainFlashStartSv.value = 0;
+      terrainOverlayOpacitySv.value = 0;
 
       dspPeakG.value = 0;
       peakFifo0Sv.value = 0;

@@ -317,6 +317,12 @@ export const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 2,
   },
+  terrainIcon: {
+    fontSize: 28,
+    textShadowColor: 'rgba(0,0,0,0.85)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
   hfTelemetryRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',

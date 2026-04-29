@@ -15,6 +15,7 @@ import {
   type SuspensionBumpDiagResult,
   useSuspensionBumpFsm,
 } from './useSuspensionBumpFsm';
+import { WHEELBASE_M } from './oscilloscope/dspConstants';
 import { MONO_FONT } from './oscilloscope/constants';
 import { OscilloscopeChart } from './oscilloscope/OscilloscopeChart';
 import { OscilloscopeDashboard } from './oscilloscope/OscilloscopeDashboard';
@@ -70,12 +71,38 @@ export default function OscilloscopeView() {
     });
   }, [isHfLoggingSv]);
 
+  const [calUiBanner, setCalUiBanner] = useState<string | null>(null);
+  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
+  const [dashLocked, setDashLocked] = useState(false);
+  const [bumpDiag, setBumpDiag] = useState<SuspensionBumpDiagResult | null>(null);
+  const [telemetryPresetMode, setTelemetryPresetMode] = useState<TelemetryPresetMode>('HIGH_SPEED_IMPACT');
+  const [dspPresetSyncNonce, setDspPresetSyncNonce] = useState(0);
+
   const exportToJSON = useCallback(async () => {
     if (hfLogRef.current.length === 0) {
       Alert.alert('No HF telemetry to export');
       return;
     }
-    const jsonStr = JSON.stringify(hfLogRef.current);
+    const currentConfig =
+      telemetryPresetMode === 'custom'
+        ? {
+            name: 'Custom',
+            alpha: vertFastAlphaSv.value,
+            multiplier: sensitivityMultiplierSv.value,
+            threshold: bumpThresholdGsv.value,
+            stableZone: stableZoneGsv.value,
+          }
+        : TELEMETRY_PRESETS[telemetryPresetMode];
+    const exportPayload = {
+      metadata: {
+        exportTime: new Date().toISOString(),
+        presetMode: telemetryPresetMode,
+        config: currentConfig,
+        wheelbase_m: WHEELBASE_M,
+      },
+      data: hfLogRef.current,
+    };
+    const jsonStr = JSON.stringify(exportPayload);
     const baseUri = FileSystem.documentDirectory;
     if (!baseUri) {
       Alert.alert('Export failed', 'Documents directory unavailable.');
@@ -90,14 +117,7 @@ export default function OscilloscopeView() {
     } catch (e) {
       Alert.alert('Export failed', e instanceof Error ? e.message : 'Could not write or share.');
     }
-  }, []);
-
-  const [calUiBanner, setCalUiBanner] = useState<string | null>(null);
-  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
-  const [dashLocked, setDashLocked] = useState(false);
-  const [bumpDiag, setBumpDiag] = useState<SuspensionBumpDiagResult | null>(null);
-  const [telemetryPresetMode, setTelemetryPresetMode] = useState<TelemetryPresetMode>('HIGH_SPEED_IMPACT');
-  const [dspPresetSyncNonce, setDspPresetSyncNonce] = useState(0);
+  }, [bumpThresholdGsv, sensitivityMultiplierSv, stableZoneGsv, telemetryPresetMode, vertFastAlphaSv]);
 
   const onBumpEventComplete = useCallback((result: SuspensionBumpDiagResult) => {
     setBumpDiag(result);
@@ -120,7 +140,7 @@ export default function OscilloscopeView() {
   const telemetryPresetLabel =
     telemetryPresetMode === 'custom' ? 'Custom DSP' : TELEMETRY_PRESETS[telemetryPresetMode].name;
 
-  const { resetBumpFsm } = useSuspensionBumpFsm({
+  const { resetBumpFsm, impactStartMsSv } = useSuspensionBumpFsm({
     vertZ: cleanVertZSv,
     hasCalib: hasCalibSv,
     onBumpComplete: onBumpEventComplete,
@@ -130,16 +150,29 @@ export default function OscilloscopeView() {
     harshPeakG: harshPeakGsv,
     overdampedSettlingMs: overdampedSettlingMssv,
     zeroCrossEpsG: zeroCrossEpsGsv,
+    speedKmH: sv.speedKmH,
   });
 
-  const { hud, onChartLayout, gridPath, baselinePath, oscilloscopePath } = useOscilloscopeTelemetryEngine(
+  const {
+    hud,
+    onChartLayout,
+    gridPath,
+    baselinePath,
+    frontBaseTrace,
+    frontActiveTrace,
+    rearBaseTrace,
+    rearActiveTrace,
+    terrainKindSv,
+    terrainOverlayOpacitySv,
+  } = useOscilloscopeTelemetryEngine(
     winW,
     winH,
     dashLocked,
     setAdvancedSettingsOpen,
     sv,
     isHfLoggingSv,
-    appendHfData
+    appendHfData,
+    impactStartMsSv
   );
 
   const { instantCalibrate, resetPeakMax } = useOscilloscopeCalibration({
@@ -154,7 +187,12 @@ export default function OscilloscopeView() {
       <OscilloscopeChart
         gridPath={gridPath}
         baselinePath={baselinePath}
-        oscilloscopePath={oscilloscopePath}
+        frontBaseTrace={frontBaseTrace}
+        frontActiveTrace={frontActiveTrace}
+        rearBaseTrace={rearBaseTrace}
+        rearActiveTrace={rearActiveTrace}
+        terrainKindSv={terrainKindSv}
+        terrainOverlayOpacitySv={terrainOverlayOpacitySv}
         onLayout={onChartLayout}
         calUiBanner={calUiBanner}
         mono={mono}

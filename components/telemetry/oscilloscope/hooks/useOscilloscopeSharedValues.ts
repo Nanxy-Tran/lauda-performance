@@ -1,10 +1,13 @@
 import { useSharedValue } from 'react-native-reanimated';
 
 import { BUFFER_LEN } from '../constants';
+import { KALMAN_P0 } from '../dspConstants';
 
 /**
  * All UI-thread telemetry state for accel projection, waveform buffer, HUD, and DSP sliders.
  * `chartW/H` bootstrap from window size; layout + effects keep SVs aligned on resize.
+ *
+ * `vertUserLpSv` — tunable first-stage EMA (user α). `cleanVertZSv` — final telemetry (drift + 25 Hz + Kalman out) for chart/FSM/HUD.
  */
 export function useOscilloscopeSharedValues(winW: number, winH: number) {
   const chartWsv = useSharedValue(Math.max(winW, 120));
@@ -18,6 +21,16 @@ export function useOscilloscopeSharedValues(winW: number, winH: number) {
   const gravUnitY = useSharedValue(0);
   const gravUnitZ = useSharedValue(1);
 
+  /** User-tunable LPF on linear vert Z (before MotoGP DSP chain). */
+  const vertUserLpSv = useSharedValue(0);
+  /** Drift slow LP of `vertUserLp` for high-pass by subtraction. */
+  const dspDriftLpSv = useSharedValue(0);
+  /** 25 Hz-ish road/suspension band after drift removal. */
+  const dspRoadLpfSv = useSharedValue(0);
+  /** 1D Kalman estimate (g). */
+  const dspKalmanXSv = useSharedValue(0);
+  const dspKalmanPSv = useSharedValue(KALMAN_P0);
+  /** Final vertical g for buffer, FSM, HF log (post chain). */
   const cleanVertZSv = useSharedValue(0);
   const hasCalibSv = useSharedValue(0);
 
@@ -53,6 +66,20 @@ export function useOscilloscopeSharedValues(winW: number, winH: number) {
 
   const speedKmH = useSharedValue(0);
 
+  /** Wall clock delta for filter tuning (updated in reaction). */
+  const lastAccelSampleWallMsSv = useSharedValue(0);
+
+  /** Terrain classifier + overlay (numbers: see dspConstants). */
+  const terrainKindSv = useSharedValue(0);
+  const terrainSbStateSv = useSharedValue(0);
+  const terrainSbPeakTimeSv = useSharedValue(0);
+  const terrainPhStateSv = useSharedValue(0);
+  const terrainPhPeakTimeSv = useSharedValue(0);
+
+  /** 0 = no flash; else Date.now() at last terrain hit. */
+  const terrainFlashStartSv = useSharedValue(0);
+  const terrainOverlayOpacitySv = useSharedValue(0);
+
   return {
     chartWsv,
     chartHsv,
@@ -62,6 +89,11 @@ export function useOscilloscopeSharedValues(winW: number, winH: number) {
     gravUnitX,
     gravUnitY,
     gravUnitZ,
+    vertUserLpSv,
+    dspDriftLpSv,
+    dspRoadLpfSv,
+    dspKalmanXSv,
+    dspKalmanPSv,
     cleanVertZSv,
     hasCalibSv,
     vertFastAlphaSv,
@@ -91,6 +123,14 @@ export function useOscilloscopeSharedValues(winW: number, winH: number) {
     peakFifo2Sv,
     peakFifo3Sv,
     speedKmH,
+    lastAccelSampleWallMsSv,
+    terrainKindSv,
+    terrainSbStateSv,
+    terrainSbPeakTimeSv,
+    terrainPhStateSv,
+    terrainPhPeakTimeSv,
+    terrainFlashStartSv,
+    terrainOverlayOpacitySv,
   };
 }
 
