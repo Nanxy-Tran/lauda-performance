@@ -5,27 +5,41 @@ export type PresetConfig = {
   multiplier: number;
   threshold: number;
   stableZone: number;
+  stableHoldMs: number;
+  harshPeakG: number;
+  overdampedSettlingMs: number;
   name: string;
 };
 
-/** Default ride profile: highway / spirited — balanced LPF vs chart gain, bumps only above ~0.35 g. */
+/**
+ * RACING / HIGH SPEED: Stiff suspension.
+ * Expected to settle very quickly (under 450ms). Hard impacts expected.
+ */
 export const HIGH_SPEED_IMPACT_PRESET: PresetConfig = {
   alpha: 0.06,
   multiplier: 2.5,
   threshold: 0.35,
   stableZone: 0.15,
-  name: 'High Speed Impact',
+  stableHoldMs: 150,
+  harshPeakG: 1.5,
+  overdampedSettlingMs: 450,
+  name: 'Sport / Stiff',
 };
 
 /**
- * Road chatter / micro-vibrations — higher α (less LPF damping), stronger chart zoom, sensitive bump FSM.
+ * CITY COMFORT @ 60 km/h: Plush, long-travel suspension.
+ * Allows for "boat-like" floating (stableZone 0.18).
+ * Needs longer to settle before calling underdamped/overdamped (850ms harsh band).
  */
 export const SMOOTH_SURFACE_PRESET: PresetConfig = {
-  alpha: 0.2,
-  multiplier: 4.5,
-  threshold: 0.1,
-  stableZone: 0.15,
-  name: 'Smooth & Micro',
+  alpha: 0.15,
+  multiplier: 3.0,
+  threshold: 0.15,
+  stableZone: 0.18,
+  stableHoldMs: 200,
+  harshPeakG: 1.2,
+  overdampedSettlingMs: 850,
+  name: 'City Comfort',
 };
 
 export const TELEMETRY_PRESETS = {
@@ -42,13 +56,18 @@ export type TelemetryPresetTargets = {
   sensitivityMultiplierSv: SharedValue<number>;
   bumpThresholdG: SharedValue<number>;
   stableZoneG: SharedValue<number>;
+  stableHoldMs: SharedValue<number>;
+  harshPeakG: SharedValue<number>;
+  overdampedSettlingMs: SharedValue<number>;
 };
 
 /** Apply preset DSP/FSM gates on the JS thread; SharedValues are read immediately in worklets. */
 export function applyPresetConfig(cfg: PresetConfig, targets: TelemetryPresetTargets): void {
-  const { vertFastAlphaSv, sensitivityMultiplierSv, bumpThresholdG, stableZoneG } = targets;
-  vertFastAlphaSv.value = cfg.alpha;
-  sensitivityMultiplierSv.value = cfg.multiplier;
-  bumpThresholdG.value = cfg.threshold;
-  stableZoneG.value = cfg.stableZone;
+  targets.vertFastAlphaSv.value = cfg.alpha;
+  targets.sensitivityMultiplierSv.value = cfg.multiplier;
+  targets.bumpThresholdG.value = cfg.threshold;
+  targets.stableZoneG.value = cfg.stableZone;
+  targets.stableHoldMs.value = cfg.stableHoldMs;
+  targets.harshPeakG.value = cfg.harshPeakG;
+  targets.overdampedSettlingMs.value = cfg.overdampedSettlingMs;
 }

@@ -91,6 +91,9 @@ export default function OscilloscopeView() {
             multiplier: sensitivityMultiplierSv.value,
             threshold: bumpThresholdGsv.value,
             stableZone: stableZoneGsv.value,
+            stableHoldMs: stableHoldMssv.value,
+            harshPeakG: harshPeakGsv.value,
+            overdampedSettlingMs: overdampedSettlingMssv.value,
           }
         : TELEMETRY_PRESETS[telemetryPresetMode];
     const exportPayload = {
@@ -117,7 +120,16 @@ export default function OscilloscopeView() {
     } catch (e) {
       Alert.alert('Export failed', e instanceof Error ? e.message : 'Could not write or share.');
     }
-  }, [bumpThresholdGsv, sensitivityMultiplierSv, stableZoneGsv, telemetryPresetMode, vertFastAlphaSv]);
+  }, [
+    bumpThresholdGsv,
+    harshPeakGsv,
+    overdampedSettlingMssv,
+    sensitivityMultiplierSv,
+    stableHoldMssv,
+    stableZoneGsv,
+    telemetryPresetMode,
+    vertFastAlphaSv,
+  ]);
 
   const onBumpEventComplete = useCallback((result: SuspensionBumpDiagResult) => {
     setBumpDiag(result);
@@ -130,11 +142,22 @@ export default function OscilloscopeView() {
         sensitivityMultiplierSv,
         bumpThresholdG: bumpThresholdGsv,
         stableZoneG: stableZoneGsv,
+        stableHoldMs: stableHoldMssv,
+        harshPeakG: harshPeakGsv,
+        overdampedSettlingMs: overdampedSettlingMssv,
       });
       setTelemetryPresetMode(id);
       setDspPresetSyncNonce((n) => n + 1);
     },
-    [bumpThresholdGsv, sensitivityMultiplierSv, stableZoneGsv, vertFastAlphaSv]
+    [
+      bumpThresholdGsv,
+      harshPeakGsv,
+      overdampedSettlingMssv,
+      sensitivityMultiplierSv,
+      stableHoldMssv,
+      stableZoneGsv,
+      vertFastAlphaSv,
+    ]
   );
 
   const telemetryPresetLabel =

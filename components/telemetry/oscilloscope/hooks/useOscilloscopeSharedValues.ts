@@ -38,8 +38,8 @@ export function useOscilloscopeSharedValues(winW: number, winH: number) {
   const sensitivityMultiplierSv = useSharedValue(2.5);
   const bumpThresholdGsv = useSharedValue(0.35);
   const stableZoneGsv = useSharedValue(0.15);
-  const stableHoldMssv = useSharedValue(200);
-  const harshPeakGsv = useSharedValue(1.0);
+  const stableHoldMssv = useSharedValue(150);
+  const harshPeakGsv = useSharedValue(1.5);
   const overdampedSettlingMssv = useSharedValue(450);
   const zeroCrossEpsGsv = useSharedValue(0.06);
 
