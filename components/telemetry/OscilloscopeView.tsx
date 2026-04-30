@@ -23,7 +23,6 @@ import { styles } from './oscilloscope/styles';
 import { useOscilloscopeCalibration } from './oscilloscope/hooks/useOscilloscopeCalibration';
 import { useOscilloscopeSharedValues } from './oscilloscope/hooks/useOscilloscopeSharedValues';
 import { useOscilloscopeTelemetryEngine } from './oscilloscope/hooks/useOscilloscopeTelemetryEngine';
-import { usePerformanceAnalyzer } from './usePerformanceAnalyzer';
 
 export default function OscilloscopeView() {
   const { width: winW, height: winH } = useWindowDimensions();
@@ -72,7 +71,7 @@ export default function OscilloscopeView() {
     });
   }, [isHfLoggingSv]);
 
-  const [calUiBanner, setCalUiBanner] = useState<string | null>(null);
+  const [precisionCalBusy, setPrecisionCalBusy] = useState(false);
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [dashLocked, setDashLocked] = useState(false);
   const [frontBumpDiag, setFrontBumpDiag] = useState<SuspensionBumpDiagResult | null>(null);
@@ -188,6 +187,8 @@ export default function OscilloscopeView() {
     speedKmH: sv.speedKmH,
   });
 
+  const settlePrecisionCalib = useCallback(() => setPrecisionCalBusy(false), []);
+
   const {
     hud,
     onChartLayout,
@@ -203,20 +204,15 @@ export default function OscilloscopeView() {
     setAdvancedSettingsOpen,
     sv,
     isHfLoggingSv,
-    appendHfData
+    appendHfData,
+    settlePrecisionCalib
   );
 
-  const { latestResult: performanceLatest } = usePerformanceAnalyzer({
-    speedKmH: sv.speedKmH,
-    pitchDeg: sv.dspPitchDeg,
-    hasCalibSv: sv.hasCalibSv,
-  });
-
-  const { instantCalibrate, resetPeakMax } = useOscilloscopeCalibration({
+  const { startPrecisionCalibrate, resetPeakMax } = useOscilloscopeCalibration({
     sv,
     resetBumpFsm,
     clearBumpDiagnostics,
-    setCalUiBanner,
+    setPrecisionCalibBusy: setPrecisionCalBusy,
   });
 
   return (
@@ -228,8 +224,10 @@ export default function OscilloscopeView() {
         terrainKindSv={terrainKindSv}
         terrainOverlayOpacitySv={terrainOverlayOpacitySv}
         onLayout={onChartLayout}
-        calUiBanner={calUiBanner}
         mono={mono}
+        calStateSv={sv.calStateSv}
+        calProgressSv={sv.calProgressSv}
+        chartWsv={sv.chartWsv}
       />
 
       <OscilloscopeDashboard
@@ -248,13 +246,12 @@ export default function OscilloscopeView() {
         sv={sv}
         dspPresetSyncNonce={dspPresetSyncNonce}
         setTelemetryPresetMode={setTelemetryPresetMode}
-        calUiBanner={calUiBanner}
+        precisionCalBusy={precisionCalBusy}
         resetPeakMax={resetPeakMax}
-        instantCalibrate={instantCalibrate}
+        startPrecisionCalibrate={startPrecisionCalibrate}
         isHfLogging={isHfLogging}
         toggleHfLog={toggleHfLog}
         exportToJSON={exportToJSON}
-        performanceResult={performanceLatest}
       />
     </View>
   );

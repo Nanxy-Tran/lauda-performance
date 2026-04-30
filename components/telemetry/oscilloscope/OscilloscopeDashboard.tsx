@@ -8,7 +8,6 @@ import { OscilloscopeSettingsDrawer } from './OscilloscopeSettingsDrawer';
 import type { TelemetryPresetId, TelemetryPresetMode } from '../telemetryPresets';
 import { HudMetricTile } from './HudMetricTile';
 import type { HudSnap } from './types';
-import type { PerformanceResult } from '../usePerformanceAnalyzer';
 import type { SuspensionBumpDiagResult } from '../useSuspensionBumpFsm';
 import type { OscilloscopeSharedValues } from './hooks/useOscilloscopeSharedValues';
 import { styles } from './styles';
@@ -36,15 +35,13 @@ export type OscilloscopeDashboardProps = {
   dspPresetSyncNonce: number;
   setTelemetryPresetMode: React.Dispatch<React.SetStateAction<TelemetryPresetMode>>;
 
-  calUiBanner: string | null;
+  precisionCalBusy: boolean;
   resetPeakMax: () => void;
-  instantCalibrate: () => void;
+  startPrecisionCalibrate: () => void;
 
   isHfLogging: boolean;
   toggleHfLog: () => void;
   exportToJSON: () => void;
-
-  performanceResult: PerformanceResult | null;
 };
 
 export function OscilloscopeDashboard({
@@ -63,13 +60,12 @@ export function OscilloscopeDashboard({
   sv,
   dspPresetSyncNonce,
   setTelemetryPresetMode,
-  calUiBanner,
+  precisionCalBusy,
   resetPeakMax,
-  instantCalibrate,
+  startPrecisionCalibrate,
   isHfLogging,
   toggleHfLog,
   exportToJSON,
-  performanceResult,
 }: OscilloscopeDashboardProps) {
   const { speedKmH, dspPeakVertZSv, dspPitchDeg, dspRollDeg } = sv;
 
@@ -199,23 +195,6 @@ export function OscilloscopeDashboard({
         </View>
 
         <View style={styles.hudSection}>
-          <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Performance</Text>
-          <View style={styles.performanceCard}>
-            <Text style={[styles.performanceCardTitle, { fontFamily: mono }]}>RECENT</Text>
-            <Text style={[styles.performanceCardMetric, { fontFamily: mono }]}>
-              {performanceResult
-                ? performanceResult.type === 'ACCEL'
-                  ? `0-60 km/h: ${performanceResult.timeSeconds.toFixed(2)} sec (Squat: +${performanceResult.maxPitchDeg.toFixed(1)}°)`
-                  : `60-0 km/h: ${performanceResult.distanceMeters.toFixed(2)} meters (Dive: ${performanceResult.maxPitchDeg.toFixed(1)}°)`
-                : 'Idle — auto-detects squat launch (0-60) or dive braking (60-0).'}
-            </Text>
-            <Text style={[styles.performanceHint, { fontFamily: mono }]}>
-              Tab Analyzer for full lab. GPS speed + CAL required.
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.hudSection}>
           <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Suspension · dual axis</Text>
           <View style={styles.bumpAdviceRowDual}>
             <AxisBumpAdviceCard
@@ -248,11 +227,11 @@ export function OscilloscopeDashboard({
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Reset peak G and angle maximums to zero"
-          disabled={dashLocked || calUiBanner !== null}
+          disabled={dashLocked || precisionCalBusy}
           onPress={resetPeakMax}
           style={({ pressed }) => [
             styles.resetMaxBtn,
-            (dashLocked || calUiBanner !== null) && styles.resetMaxBtnDisabled,
+            (dashLocked || precisionCalBusy) && styles.resetMaxBtnDisabled,
             pressed && styles.resetMaxBtnPressed,
           ]}
         >
@@ -268,14 +247,14 @@ export function OscilloscopeDashboard({
         />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Instant calibration: snap vertical axis to zero using current gravity. Long press to open filter settings."
-          disabled={calUiBanner !== null}
-          onPress={instantCalibrate}
+          accessibilityLabel="Precision calibration: average gravity axis over ~3 seconds. Long press to open filter settings."
+          disabled={precisionCalBusy}
+          onPress={startPrecisionCalibrate}
           onLongPress={() => {
-            if (!dashLocked && calUiBanner === null) setAdvancedSettingsOpen(true);
+            if (!dashLocked && !precisionCalBusy) setAdvancedSettingsOpen(true);
           }}
           delayLongPress={450}
-          style={() => [styles.calBtn, calUiBanner !== null && styles.calBtnDisabled]}
+          style={() => [styles.calBtn, precisionCalBusy && styles.calBtnDisabled]}
         >
           <View pointerEvents="none" style={styles.calGlow} />
           <Text style={[styles.calLabel, { fontFamily: mono }]}>CAL</Text>

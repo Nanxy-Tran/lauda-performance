@@ -67,6 +67,15 @@ export function useOscilloscopeSharedValues(winW: number, winH: number) {
   const terrainFlashStartSv = useSharedValue(0);
   const terrainOverlayOpacitySv = useSharedValue(0);
 
+  /** Precision IMU calibration: 0 IDLE, 1 CALIBRATING. */
+  const calStateSv = useSharedValue(0);
+  const calStartMsSv = useSharedValue(0);
+  const calSumX = useSharedValue(0);
+  const calSumY = useSharedValue(0);
+  const calSumZ = useSharedValue(0);
+  const calCount = useSharedValue(0);
+  const calProgressSv = useSharedValue(0);
+
   return {
     chartWsv,
     chartHsv,
@@ -112,6 +121,13 @@ export function useOscilloscopeSharedValues(winW: number, winH: number) {
     terrainPhPeakTimeSv,
     terrainFlashStartSv,
     terrainOverlayOpacitySv,
+    calStateSv,
+    calStartMsSv,
+    calSumX,
+    calSumY,
+    calSumZ,
+    calCount,
+    calProgressSv,
   };
 }
 

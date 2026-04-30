@@ -26,7 +26,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="performance"
         options={{
-          title: 'Analyzer',
+          title: 'Brake Analyzer',
           tabBarIcon: ({ color }) => <IconSymbol size={28} name="stopwatch.fill" color={color} />,
         }}
       />

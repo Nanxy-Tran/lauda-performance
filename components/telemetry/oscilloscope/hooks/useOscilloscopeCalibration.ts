@@ -2,30 +2,30 @@ import { useCallback } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { runOnUI } from 'react-native-reanimated';
 
-import { accelPitchRollDegAbsolute, displayWorldZG } from '../sensorMath';
 import type { OscilloscopeSharedValues } from './useOscilloscopeSharedValues';
 
 type CalibrationParams = {
   sv: OscilloscopeSharedValues;
   resetBumpFsm: () => void;
   clearBumpDiagnostics: () => void;
-  setCalUiBanner: Dispatch<SetStateAction<string | null>>;
+  /** When non-null (e.g. OscilloscopeView), disables CAL buttons while precision cal runs */
+  setPrecisionCalibBusy?: Dispatch<SetStateAction<boolean>>;
 };
 
 export function useOscilloscopeCalibration({
   sv,
   resetBumpFsm,
   clearBumpDiagnostics,
-  setCalUiBanner,
+  setPrecisionCalibBusy,
 }: CalibrationParams) {
   const {
-    rawAx,
-    rawAy,
-    rawAz,
-    gravUnitX,
-    gravUnitY,
-    gravUnitZ,
-    cleanVertZSv,
+    calStateSv,
+    calStartMsSv,
+    calSumX,
+    calSumY,
+    calSumZ,
+    calCount,
+    calProgressSv,
     hasCalibSv,
     dspPeakG,
     peakFifo0Sv,
@@ -35,84 +35,36 @@ export function useOscilloscopeCalibration({
     dspPeakRollLeftDeg,
     dspPeakRollRightDeg,
     dspPeakVertZSv,
-    dspPitchDeg,
-    dspRollDeg,
-    pitchCalBiasDegSv,
-    rollCalBiasDegSv,
-    pitchFusDegSv,
-    rollFusDegSv,
-    waveData,
-    writeIdxSv,
-    sampleTick,
-    hudDisplayZSv,
-    terrainKindSv,
-    terrainSbStateSv,
-    terrainSbPeakTimeSv,
-    terrainPhStateSv,
-    terrainPhPeakTimeSv,
-    terrainFlashStartSv,
-    terrainOverlayOpacitySv,
   } = sv;
 
-  const flashCalBanner = useCallback(() => {
-    setCalUiBanner('Calibrating · Z on zero');
-    setTimeout(() => setCalUiBanner(null), 450);
-  }, []);
-
-  /** CAL: freeze gravity axis = normalized accelerometer vector; zero vertical bump channel. Pitch/roll bias from accel. */
-  const instantCalibrate = useCallback(() => {
-    runOnUI(() => {
-      'worklet';
-      const bx = rawAx.value;
-      const by = rawAy.value;
-      const bz = rawAz.value;
-      const m = Math.sqrt(bx * bx + by * by + bz * bz);
-      if (m > 1e-6) {
-        gravUnitX.value = bx / m;
-        gravUnitY.value = by / m;
-        gravUnitZ.value = bz / m;
-      }
-
-      cleanVertZSv.value = 0;
-      terrainKindSv.value = 0;
-      terrainSbStateSv.value = 0;
-      terrainSbPeakTimeSv.value = 0;
-      terrainPhStateSv.value = 0;
-      terrainPhPeakTimeSv.value = 0;
-      terrainFlashStartSv.value = 0;
-      terrainOverlayOpacitySv.value = 0;
-
-      dspPeakG.value = 0;
-      peakFifo0Sv.value = 0;
-      peakFifo1Sv.value = 0;
-      peakFifo2Sv.value = 0;
-      peakFifo3Sv.value = 0;
-      dspPeakRollLeftDeg.value = 0;
-      dspPeakRollRightDeg.value = 0;
-      dspPeakVertZSv.value = 0;
-      dspPitchDeg.value = 0;
-      dspRollDeg.value = 0;
-
-      const { pitchDeg: pCal, rollDeg: rCal } = accelPitchRollDegAbsolute(bx, by, bz);
-      pitchCalBiasDegSv.value = pCal;
-      rollCalBiasDegSv.value = rCal;
-      pitchFusDegSv.value = pCal;
-      rollFusDegSv.value = rCal;
-
-      const buf = waveData.value;
-      buf.fill(0);
-      waveData.value = buf;
-      writeIdxSv.value = 0;
-      sampleTick.value = 0;
-      hudDisplayZSv.value = displayWorldZG(cleanVertZSv.value);
-
-      hasCalibSv.value = 1;
-    })();
-    flashCalBanner();
+  const startPrecisionCalibrate = useCallback(() => {
+    setPrecisionCalibBusy?.(true);
     resetBumpFsm();
     clearBumpDiagnostics();
-    /* eslint-disable-next-line react-hooks/exhaustive-deps */
-  }, [flashCalBanner, resetBumpFsm]);
+    runOnUI(() => {
+      'worklet';
+      calSumX.value = 0;
+      calSumY.value = 0;
+      calSumZ.value = 0;
+      calCount.value = 0;
+      calProgressSv.value = 0;
+      hasCalibSv.value = 0;
+      calStartMsSv.value = Date.now();
+      calStateSv.value = 1;
+    })();
+  }, [
+    calCount,
+    calProgressSv,
+    calStartMsSv,
+    calStateSv,
+    calSumX,
+    calSumY,
+    calSumZ,
+    clearBumpDiagnostics,
+    hasCalibSv,
+    resetBumpFsm,
+    setPrecisionCalibBusy,
+  ]);
 
   const resetPeakMax = useCallback(() => {
     runOnUI(() => {
@@ -137,5 +89,5 @@ export function useOscilloscopeCalibration({
     dspPeakVertZSv,
   ]);
 
-  return { flashCalBanner, instantCalibrate, resetPeakMax };
+  return { startPrecisionCalibrate, resetPeakMax };
 }

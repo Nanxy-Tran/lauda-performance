@@ -21,6 +21,9 @@ export const PEAK_THRESHOLD_G = 0.15;
 /** Moving-average length for Peak-G (40ms @ ~100Hz-ish sampling ≈ 4 samples). */
 export const PEAK_MA_SAMPLES = 4;
 
+/** Gravity / tilt precision calibration window (moving average over raw accel samples). */
+export const PRECISION_CALIBRATION_MS = 3000;
+
 export const MONO_FONT = Platform.select({
   ios: 'Menlo',
   android: 'monospace',

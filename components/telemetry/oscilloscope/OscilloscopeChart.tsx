@@ -16,8 +16,10 @@ export type OscilloscopeChartProps = {
   terrainKindSv: SharedValue<number>;
   terrainOverlayOpacitySv: SharedValue<number>;
   onLayout: (e: LayoutChangeEvent) => void;
-  calUiBanner: string | null;
   mono: string;
+  calStateSv: SharedValue<number>;
+  calProgressSv: SharedValue<number>;
+  chartWsv: SharedValue<number>;
 };
 
 export function OscilloscopeChart({
@@ -27,8 +29,10 @@ export function OscilloscopeChart({
   terrainKindSv,
   terrainOverlayOpacitySv,
   onLayout,
-  calUiBanner,
   mono,
+  calStateSv,
+  calProgressSv,
+  chartWsv,
 }: OscilloscopeChartProps) {
   const bumpStyle = useAnimatedStyle(() => ({
     position: 'absolute',
@@ -47,6 +51,21 @@ export function OscilloscopeChart({
       terrainKindSv.value === TERRAIN_POTHOLE ? terrainOverlayOpacitySv.value : 0,
     pointerEvents: 'none',
   }));
+
+  const calOverlayStyle = useAnimatedStyle(() => ({
+    opacity: calStateSv.value === 1 ? 1 : 0,
+    pointerEvents: 'none',
+  }));
+
+  const calProgressFillStyle = useAnimatedStyle(() => {
+    const trackW = Math.max(80, chartWsv.value * 0.88);
+    return {
+      height: '100%',
+      borderRadius: 3,
+      backgroundColor: FRONT_GREEN,
+      width: calProgressSv.value * trackW,
+    };
+  });
 
   return (
     <View style={styles.chartWrap} onLayout={onLayout}>
@@ -71,11 +90,14 @@ export function OscilloscopeChart({
         <Text style={[styles.terrainIcon, { fontFamily: mono }]}>🕳</Text>
       </Animated.View>
 
-      {calUiBanner ? (
-        <View style={styles.calBanner} pointerEvents="none">
-          <Text style={[styles.calBannerText, { fontFamily: mono }]}>{calUiBanner}</Text>
+      <Animated.View style={[styles.calPrecOverlay, calOverlayStyle]} pointerEvents="none">
+        <Text style={[styles.calPrecTitle, { fontFamily: mono }]}>
+          CALIBRATING... KEEP BIKE UPRIGHT
+        </Text>
+        <View style={styles.calPrecTrack}>
+          <Animated.View style={calProgressFillStyle} />
         </View>
-      ) : null}
+      </Animated.View>
     </View>
   );
 }

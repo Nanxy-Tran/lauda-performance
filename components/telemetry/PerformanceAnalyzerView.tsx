@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo, useState, type SetStateAction } from 'react';
-import { Pressable, ScrollView, Text, useWindowDimensions, View } from 'react-native';
-import { useSharedValue } from 'react-native-reanimated';
+import { Modal, Pressable, ScrollView, Text, useWindowDimensions, View } from 'react-native';
+import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
 
 import type { SuspensionBumpDiagResult } from './useSuspensionBumpFsm';
 import { useSuspensionBumpFsm } from './useSuspensionBumpFsm';
@@ -13,10 +13,24 @@ import { useOscilloscopeTelemetryEngine } from './oscilloscope/hooks/useOscillos
 import { styles } from './oscilloscope/styles';
 import { usePerformanceAnalyzer } from './usePerformanceAnalyzer';
 
+const CAL_PROGRESS_GREEN = '#34ff94';
+
 export default function PerformanceAnalyzerView(): React.ReactElement {
   const { width: winW, height: winH } = useWindowDimensions();
   const mono = (MONO_FONT as string) ?? 'monospace';
   const sv = useOscilloscopeSharedValues(winW, winH);
+
+  const modalTrackW = useMemo(() => Math.max(220, Math.min(winW - 88, 380)), [winW]);
+
+  const calProgressFillStyle = useAnimatedStyle(
+    () => ({
+      width: sv.calProgressSv.value * modalTrackW,
+      height: '100%' as const,
+      borderRadius: 3,
+      backgroundColor: CAL_PROGRESS_GREEN,
+    }),
+    [modalTrackW, sv.calProgressSv]
+  );
 
   const {
     cleanVertZSv,
@@ -56,6 +70,9 @@ export default function PerformanceAnalyzerView(): React.ReactElement {
 
   const noopSetAdv = useCallback((_u: SetStateAction<boolean>) => {}, []);
 
+  const [precisionCalBusy, setPrecisionCalBusy] = useState(false);
+  const settlePrecisionCalib = useCallback(() => setPrecisionCalBusy(false), []);
+
   const { hud } = useOscilloscopeTelemetryEngine(
     winW,
     winH,
@@ -63,16 +80,15 @@ export default function PerformanceAnalyzerView(): React.ReactElement {
     noopSetAdv,
     sv,
     isHfLoggingSv,
-    appendHfData
+    appendHfData,
+    settlePrecisionCalib
   );
 
-  const [calUiBanner, setCalUiBanner] = useState<string | null>(null);
-
-  const { instantCalibrate } = useOscilloscopeCalibration({
+  const { startPrecisionCalibrate } = useOscilloscopeCalibration({
     sv,
     resetBumpFsm,
     clearBumpDiagnostics,
-    setCalUiBanner,
+    setPrecisionCalibBusy: setPrecisionCalBusy,
   });
 
   useForegroundGpsStream({ speedKmH: sv.speedKmH });
@@ -83,74 +99,97 @@ export default function PerformanceAnalyzerView(): React.ReactElement {
     hasCalibSv: sv.hasCalibSv,
   });
 
-  const resultCopy = latestResult
+  const recentPerformanceLine = latestResult
     ? latestResult.type === 'ACCEL'
       ? `0-60 km/h: ${latestResult.timeSeconds.toFixed(2)} sec (Squat: +${latestResult.maxPitchDeg.toFixed(1)}°)`
       : `60-0 km/h: ${latestResult.distanceMeters.toFixed(2)} meters (Dive: ${latestResult.maxPitchDeg.toFixed(1)}°)`
-    : null;
+    : 'Idle — auto-detects squat launch (0-60) or dive braking (60-0).';
 
   return (
-    <ScrollView style={styles.bottomPanel} contentContainerStyle={{ paddingBottom: 28, gap: 16 }}>
-      {calUiBanner ? (
-        <View style={styles.performanceCalibrationFlash}>
-          <Text style={styles.calBannerText}>{calUiBanner}</Text>
+    <>
+      <Modal
+        visible={precisionCalBusy}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => {}}
+      >
+        <View style={styles.calModalBackdrop} pointerEvents="box-none">
+          <View style={styles.calModalCard} accessibilityRole="progressbar">
+            <Text style={[styles.calPrecTitle, { fontFamily: mono }]}>
+              CALIBRATING... KEEP BIKE UPRIGHT
+            </Text>
+            <View style={[styles.calModalProgressTrack, { width: modalTrackW }]}>
+              <Animated.View style={calProgressFillStyle} />
+            </View>
+          </View>
         </View>
-      ) : null}
+      </Modal>
 
-      <Text style={[styles.performanceAnalyzerTitle, { fontFamily: mono }]}>LAB · ANALYZER</Text>
-      <Text style={[styles.performanceBullet, { fontFamily: mono }]}>
-        ● Accel: creep below ~2 km/h with squat (+pitch &gt; ~1.5°), then accelerate to ≥60 km/h.
-      </Text>
-      <Text style={[styles.performanceBullet, { fontFamily: mono }]}>
-        ● Brake: &gt;~40 km/h — hard braking with dive (pitch &lt; ~−2° and sharp speed drop).
-      </Text>
-
-      <View style={styles.performanceCard}>
-        <Text style={[styles.performanceCardTitle, { fontFamily: mono }]}>LAST CAPTURE</Text>
-        <Text style={[styles.performanceCardMetric, { fontFamily: mono }]}>
-          {resultCopy ?? 'No completed run yet'}
+      <ScrollView style={styles.bottomPanel} contentContainerStyle={{ paddingBottom: 28, gap: 16 }}>
+        <Text style={[styles.performanceAnalyzerTitle, { fontFamily: mono }]}>Brake Analyzer</Text>
+        <Text style={[styles.performanceBullet, { fontFamily: mono }]}>
+          ● Accel: creep below ~2 km/h with squat (+pitch &gt; ~1.5°), then accelerate to ≥60 km/h.
         </Text>
+        <Text style={[styles.performanceBullet, { fontFamily: mono }]}>
+          ● Brake: &gt;~40 km/h — hard braking with dive (pitch &lt; ~−2° and sharp speed drop).
+        </Text>
+
+        <View style={styles.hudSection}>
+          <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Performance</Text>
+          <View style={styles.performanceCard}>
+            <Text style={[styles.performanceCardTitle, { fontFamily: mono }]}>RECENT</Text>
+            <Text style={[styles.performanceCardMetric, { fontFamily: mono }]}>
+              {recentPerformanceLine}
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Clear last performance result display"
+              disabled={precisionCalBusy}
+              hitSlop={8}
+              onPress={clearLatest}
+            >
+              <Text style={[styles.performanceHint, { fontFamily: mono }]}>Clear display</Text>
+            </Pressable>
+            <Text style={[styles.performanceHint, { fontFamily: mono }]}>
+              GPS speed + IMU CAL required. Stay on this tab during a run so capture stays live.
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.hudSection}>
+          <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Live</Text>
+          <View style={styles.hudMetricRow}>
+            <HudMetricTile label="SPD" value={hud.speed.toFixed(1)} suffix="km/h" mono={mono} />
+            <HudMetricTile
+              label="Pitch"
+              value={`${hud.pitch >= 0 ? '+' : ''}${hud.pitch.toFixed(1)}`}
+              suffix="°"
+              mono={mono}
+            />
+          </View>
+        </View>
+
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Clear last performance result display"
-          hitSlop={8}
-          onPress={clearLatest}
+          accessibilityLabel="Calibrate IMU for gravity reference (~3 seconds)"
+          disabled={precisionCalBusy}
+          onPress={startPrecisionCalibrate}
+          style={({ pressed }) => [
+            styles.calBtn,
+            precisionCalBusy && styles.calBtnDisabled,
+            pressed && styles.calBtnPressed,
+            { alignSelf: 'flex-start', paddingHorizontal: 20, paddingVertical: 14 },
+          ]}
         >
-          <Text style={[styles.performanceHint, { fontFamily: mono }]}>Clear display</Text>
+          <View pointerEvents="none" style={styles.calGlow} />
+          <Text style={[styles.calLabel, { fontFamily: mono }]}>CAL SENSOR</Text>
         </Pressable>
-      </View>
 
-      <View style={styles.hudSection}>
-        <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Live</Text>
-        <View style={styles.hudMetricRow}>
-          <HudMetricTile label="SPD" value={hud.speed.toFixed(1)} suffix="km/h" mono={mono} />
-          <HudMetricTile
-            label="Pitch"
-            value={`${hud.pitch >= 0 ? '+' : ''}${hud.pitch.toFixed(1)}`}
-            suffix="°"
-            mono={mono}
-          />
-        </View>
-      </View>
-
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Calibrate IMU for gravity reference"
-        disabled={calUiBanner !== null}
-        onPress={instantCalibrate}
-        style={({ pressed }) => [
-          styles.resetMaxBtn,
-          calUiBanner !== null && styles.resetMaxBtnDisabled,
-          pressed && styles.resetMaxBtnPressed,
-          { alignSelf: 'flex-start' },
-        ]}
-      >
-        <Text style={[styles.resetMaxLabel, { fontFamily: mono }]}>CAL SENSOR</Text>
-      </Pressable>
-
-      <Text style={[styles.performanceHint, { fontFamily: mono }]}>
-        GPS speed feeds the analyzer automatically in this tab. Calibrate stationary before sprint tests.
-      </Text>
-    </ScrollView>
+        <Text style={[styles.performanceHint, { fontFamily: mono }]}>
+          GPS speed feeds this tab automatically. Calibrate stationary before sprint or brake tests.
+        </Text>
+      </ScrollView>
+    </>
   );
 }

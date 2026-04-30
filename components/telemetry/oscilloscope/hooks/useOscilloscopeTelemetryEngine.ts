@@ -17,6 +17,7 @@ import {
   HUD_ANGLE_EMA,
   PEAK_THRESHOLD_G,
   PEAK_MA_SAMPLES,
+  PRECISION_CALIBRATION_MS,
   SPEED_DISPLAY_ZERO_BELOW_KMH,
 } from '../constants';
 import {
@@ -171,7 +172,8 @@ export function useOscilloscopeTelemetryEngine(
   setAdvancedSettingsOpen: Dispatch<SetStateAction<boolean>>,
   sv: OscilloscopeSharedValues,
   isHfLoggingSv: SharedValue<number>,
-  appendHfData: (z: number, pitch: number, roll: number, speed: number) => void
+  appendHfData: (z: number, pitch: number, roll: number, speed: number) => void,
+  onPrecisionCalibFinished?: () => void
 ) {
   const [hud, setHud] = useState<HudSnap>({
     pitch: 0,
@@ -223,6 +225,13 @@ export function useOscilloscopeTelemetryEngine(
     terrainPhPeakTimeSv,
     terrainFlashStartSv,
     terrainOverlayOpacitySv,
+    calStateSv,
+    calStartMsSv,
+    calSumX,
+    calSumY,
+    calSumZ,
+    calCount,
+    calProgressSv,
   } = sv;
 
   useAccelerometerStream(rawAx, rawAy, rawAz);
@@ -243,6 +252,10 @@ export function useOscilloscopeTelemetryEngine(
     [chartWsv, chartHsv]
   );
 
+  const notifyPrecisionCalibFinished = useCallback(() => {
+    onPrecisionCalibFinished?.();
+  }, [onPrecisionCalibFinished]);
+
   /**
    * UI-thread pipeline: gravity-linear Z → preset-tunable EMA on `cleanVertZSv`.
    * Terrain bumps/potholes and chart buffer track the same smoothed Δg signal.
@@ -257,6 +270,8 @@ export function useOscilloscopeTelemetryEngine(
       guz: gravUnitZ.value,
       hasCalib: hasCalibSv.value,
       vertFastAlpha: vertFastAlphaSv.value,
+      calState: calStateSv.value,
+      calStartMs: calStartMsSv.value,
     }),
     (cur) => {
       'worklet';
@@ -265,6 +280,71 @@ export function useOscilloscopeTelemetryEngine(
       const bx = cur.ax;
       const by = cur.ay;
       const bz = cur.az;
+
+      if (cur.calState === 1) {
+        const elapsed = now - cur.calStartMs;
+
+        if (elapsed < PRECISION_CALIBRATION_MS) {
+          calSumX.value += bx;
+          calSumY.value += by;
+          calSumZ.value += bz;
+          calCount.value += 1;
+          calProgressSv.value = elapsed / PRECISION_CALIBRATION_MS;
+          return;
+        }
+
+        const count = Math.max(1, calCount.value);
+        const avgX = calSumX.value / count;
+        const avgY = calSumY.value / count;
+        const avgZ = calSumZ.value / count;
+
+        const mn = Math.sqrt(avgX * avgX + avgY * avgY + avgZ * avgZ);
+        if (mn > 1e-6) {
+          gravUnitX.value = avgX / mn;
+          gravUnitY.value = avgY / mn;
+          gravUnitZ.value = avgZ / mn;
+        }
+
+        const { pitchDeg: pCal, rollDeg: rCal } = accelPitchRollDegAbsolute(avgX, avgY, avgZ);
+        pitchCalBiasDegSv.value = pCal;
+        rollCalBiasDegSv.value = rCal;
+        pitchFusDegSv.value = pCal;
+        rollFusDegSv.value = rCal;
+
+        cleanVertZSv.value = 0;
+        terrainKindSv.value = TERRAIN_FLAT;
+        terrainSbStateSv.value = 0;
+        terrainSbPeakTimeSv.value = 0;
+        terrainPhStateSv.value = 0;
+        terrainPhPeakTimeSv.value = 0;
+        terrainFlashStartSv.value = 0;
+        terrainOverlayOpacitySv.value = 0;
+
+        dspPeakG.value = 0;
+        peakFifo0Sv.value = 0;
+        peakFifo1Sv.value = 0;
+        peakFifo2Sv.value = 0;
+        peakFifo3Sv.value = 0;
+        dspPeakRollLeftDeg.value = 0;
+        dspPeakRollRightDeg.value = 0;
+        dspPeakVertZSv.value = 0;
+        dspPitchDeg.value = 0;
+        dspRollDeg.value = 0;
+
+        const waveBuf = waveData.value;
+        waveBuf.fill(0);
+        waveData.value = waveBuf;
+        writeIdxSv.value = 0;
+        sampleTick.value = 0;
+        hudDisplayZSv.value = displayWorldZG(cleanVertZSv.value);
+
+        calStateSv.value = 0;
+        hasCalibSv.value = 1;
+        calProgressSv.value = 1;
+
+        runOnJS(notifyPrecisionCalibFinished)();
+        return;
+      }
 
       const z_total = bx * cur.gux + by * cur.guy + bz * cur.guz;
       const vert_z_raw = z_total - 1.0;
@@ -372,7 +452,8 @@ export function useOscilloscopeTelemetryEngine(
       if (isHfLoggingSv.value === 1) {
         runOnJS(appendHfData)(cleanVertZSv.value, dspPitchDeg.value, dspRollDeg.value, speedKmH.value);
       }
-    }
+    },
+    [notifyPrecisionCalibFinished]
   );
 
   const vertZHudDerived = useDerivedValue(() => displayWorldZG(cleanVertZSv.value));
