@@ -3,12 +3,13 @@ import {
   activateKeepAwakeAsync,
   deactivateKeepAwake,
 } from 'expo-keep-awake';
-import * as Location from 'expo-location';
 import * as Sharing from 'expo-sharing';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text } from 'react-native';
 import { runOnUI } from 'react-native-reanimated';
 import type { SharedValue } from 'react-native-reanimated';
+
+import { useForegroundGpsStream } from './useForegroundGpsStream';
 
 const KEEP_AWAKE_TAG_GPS_REC = 'LaudaPerformanceGpsRec';
 
@@ -65,73 +66,47 @@ export function GpsTrackLogger({
   const trackLogLengthRef = useRef(0);
   trackLogLengthRef.current = trackLog.length;
 
-  useEffect(() => {
-    let sub: Location.LocationSubscription | undefined;
-    (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        speedKmH.value = 0;
+  useForegroundGpsStream({
+    speedKmH,
+    onSample: (sample) => {
+      const s = sample.speedMs;
+      if (!isLoggingRef.current || s <= 0) {
         return;
       }
-      try {
-        sub = await Location.watchPositionAsync(
-          {
-            accuracy: Location.Accuracy.BestForNavigation,
-            timeInterval: 100,
-            distanceInterval: 0,
-          },
-          (loc) => {
-            const speedMs = loc.coords.speed;
-            const s = Math.max(speedMs ?? 0, 0);
-            speedKmH.value = s * 3.6;
 
-            if (!isLoggingRef.current || s <= 0) {
-              return;
-            }
-
-            const lat = loc.coords.latitude;
-            const lon = loc.coords.longitude;
-            if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-              return;
-            }
-
-            const maxZ = dspPeakVertZSv.value;
-            const roll = dspRollDeg.value;
-            const pitch = dspPitchDeg.value;
-            const ele = loc.coords.altitude;
-            const spdKmh = s * 3.6;
-            const timeStr =
-              loc.timestamp != null && loc.timestamp > 0
-                ? new Date(loc.timestamp).toISOString()
-                : new Date().toISOString();
-
-            const point: TrackPoint = {
-              lat,
-              lon,
-              ele: ele != null && Number.isFinite(ele) ? ele : 0,
-              speed: spdKmh,
-              maxZ,
-              roll,
-              pitch,
-              time: timeStr,
-            };
-
-            setTrackLog((prev) => [...prev, point]);
-
-            runOnUI(() => {
-              'worklet';
-              dspPeakVertZSv.value = 0;
-            })();
-          }
-        );
-      } catch {
-        speedKmH.value = 0;
+      const lat = sample.latitude;
+      const lon = sample.longitude;
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        return;
       }
-    })();
-    return () => {
-      void sub?.remove();
-    };
-  }, [dspPeakVertZSv, dspPitchDeg, dspRollDeg, speedKmH]);
+
+      const maxZ = dspPeakVertZSv.value;
+      const roll = dspRollDeg.value;
+      const pitch = dspPitchDeg.value;
+      const ele = sample.altitude;
+      const spdKmh = s * 3.6;
+      const timeStr =
+        sample.timestampMs > 0 ? new Date(sample.timestampMs).toISOString() : new Date().toISOString();
+
+      const point: TrackPoint = {
+        lat,
+        lon,
+        ele: ele != null && Number.isFinite(ele) ? ele : 0,
+        speed: spdKmh,
+        maxZ,
+        roll,
+        pitch,
+        time: timeStr,
+      };
+
+      setTrackLog((prev) => [...prev, point]);
+
+      runOnUI(() => {
+        'worklet';
+        dspPeakVertZSv.value = 0;
+      })();
+    },
+  });
 
   const toggleTrackLogging = useCallback(() => {
     setIsLogging((prev) => {

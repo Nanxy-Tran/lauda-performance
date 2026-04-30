@@ -18,6 +18,7 @@ const MAPPING = {
   'chevron.left.forwardslash.chevron.right': 'code',
   'chevron.right': 'chevron-right',
   'waveform.path.ecg': 'multiline-chart',
+  'stopwatch.fill': 'timer',
 } as const satisfies Partial<Record<SymbolViewProps['name'], MaterialIconName>>;
 
 type IconSymbolName = keyof typeof MAPPING;

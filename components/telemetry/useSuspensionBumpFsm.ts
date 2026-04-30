@@ -4,12 +4,10 @@ import type { FrameInfo, SharedValue } from 'react-native-reanimated';
 
 import { WHEELBASE_M } from './oscilloscope/dspConstants';
 
-/** Internal FSM states (UI-thread only). */
 const FSM_IDLE = 0;
 const FSM_IMPACT = 1;
 const FSM_SETTLING = 2;
 
-/** Max time in SETTLING before abandoning without dispatch (avoids stuck state). */
 const SETTLING_ABORT_MS = 12000;
 
 export type SuspensionSurfaceStatus =
@@ -19,7 +17,6 @@ export type SuspensionSurfaceStatus =
   | 'GOOD';
 
 export type SuspensionBumpDiagResult = {
-  /** Highest |Z| during IMPACT (g). */
   maxPeakZG: number;
   bounceCount: number;
   impactStartMs: number;
@@ -27,6 +24,7 @@ export type SuspensionBumpDiagResult = {
   compressionAdvice: string;
   reboundAdvice: string;
   surfaceStatus: SuspensionSurfaceStatus;
+  pitchBiasNote: string;
 };
 
 function evaluateDiagnostics(
@@ -67,32 +65,42 @@ function evaluateDiagnostics(
   return { compressionAdvice, reboundAdvice, surfaceStatus };
 }
 
+function pitchBiasNoteFromDeg(deg: number): string {
+  'worklet';
+  if (deg < -2.0) {
+    return `BRAKING: Front loaded (${deg.toFixed(1)}°). Expect harsher impact.`;
+  }
+  if (deg > 2.0) {
+    return `ACCELERATING: Rear loaded (${deg.toFixed(1)}°).`;
+  }
+  return 'COASTING: Neutral balance.';
+}
+
+function rearHitDelayMsSpeed(speedKmH: number): number {
+  'worklet';
+  const cms = Math.max(speedKmH / 3.6, 0.001);
+  return (WHEELBASE_M / cms) * 1000;
+}
+
 export type UseSuspensionBumpFsmParams = {
-  /** Drift-free vertical acceleration (g), e.g. `cleanVertZSv`. */
   vertZ: SharedValue<number>;
   hasCalib: SharedValue<number>;
-  onBumpComplete: (result: SuspensionBumpDiagResult) => void;
+  pitchDeg: SharedValue<number>;
+  onDiagnosticsReady: (frontDiag: SuspensionBumpDiagResult, rearDiag: SuspensionBumpDiagResult | null) => void;
   bumpThresholdG: SharedValue<number>;
   stableZoneG: SharedValue<number>;
   stableHoldMs: SharedValue<number>;
   harshPeakG: SharedValue<number>;
   overdampedSettlingMs: SharedValue<number>;
   zeroCrossEpsG: SharedValue<number>;
-  /** Vehicle speed (km/h) for front→rear propagation deadzone during SETTLING. */
   speedKmH: SharedValue<number>;
 };
 
-/**
- * Core suspension bump FSM: runs on the UI thread via `useFrameCallback`, reads `vertZ` every frame,
- * and invokes `onBumpComplete` **once** per completed bump (via `runOnJS`).
- * Thresholds are SharedValues so they can be tuned live from the UI.
- *
- * `impactStartMsSv` is wall-clock (`Date.now()`), shared with the oscilloscope for dual-trace windows.
- */
 export function useSuspensionBumpFsm({
   vertZ,
   hasCalib,
-  onBumpComplete,
+  pitchDeg,
+  onDiagnosticsReady,
   bumpThresholdG,
   stableZoneG,
   stableHoldMs,
@@ -100,27 +108,44 @@ export function useSuspensionBumpFsm({
   overdampedSettlingMs,
   zeroCrossEpsG,
   speedKmH,
-}: UseSuspensionBumpFsmParams): {
-  resetBumpFsm: () => void;
-  impactStartMsSv: SharedValue<number>;
-} {
-  const onBumpCompleteRef = useRef(onBumpComplete);
-  onBumpCompleteRef.current = onBumpComplete;
+}: UseSuspensionBumpFsmParams): { resetBumpFsm: () => void } {
+  const cbRef = useRef(onDiagnosticsReady);
+  cbRef.current = onDiagnosticsReady;
+  const lastFrontDiagRef = useRef<SuspensionBumpDiagResult | null>(null);
 
-  const dispatchBumpComplete = useCallback((result: SuspensionBumpDiagResult) => {
-    onBumpCompleteRef.current(result);
+  const emitFrontDoneJS = useCallback((r: SuspensionBumpDiagResult) => {
+    lastFrontDiagRef.current = r;
+    cbRef.current(r, null);
   }, []);
 
-  const fsmStateSv = useSharedValue(FSM_IDLE);
-  const maxPeakZSv = useSharedValue(0);
-  const bounceCountSv = useSharedValue(0);
-  const impactStartMsSv = useSharedValue(0);
-  const settlingStartMsSv = useSharedValue(0);
-  const prevZSv = useSharedValue(0);
-  const stableAccumMsSv = useSharedValue(0);
+  const emitRearWithStoredFrontJS = useCallback((rear: SuspensionBumpDiagResult) => {
+    const f = lastFrontDiagRef.current;
+    if (f) {
+      cbRef.current(f, rear);
+    }
+  }, []);
+
+  const fStateSv = useSharedValue(FSM_IDLE);
+  const fMaxPeakSv = useSharedValue(0);
+  const fBouncesSv = useSharedValue(0);
+  const fImpactMsSv = useSharedValue(0);
+  const fSettlingStartSv = useSharedValue(0);
+  const fPrevZSv = useSharedValue(0);
+  const fStableAccumSv = useSharedValue(0);
+  const fPitchAtImpactSv = useSharedValue(0);
+
+  const rearKickAtMsSv = useSharedValue(0);
+
+  const rStateSv = useSharedValue(FSM_IDLE);
+  const rMaxPeakSv = useSharedValue(0);
+  const rBouncesSv = useSharedValue(0);
+  const rImpactMsSv = useSharedValue(0);
+  const rSettlingStartSv = useSharedValue(0);
+  const rPrevZSv = useSharedValue(0);
+  const rStableAccumSv = useSharedValue(0);
 
   const bumpWorklet = useMemo(() => {
-    const w = (frame: FrameInfo) => {
+    const w = (_frame: FrameInfo) => {
       'worklet';
       if (hasCalib.value !== 1) {
         return;
@@ -135,95 +160,151 @@ export function useSuspensionBumpFsm({
 
       const z = vertZ.value;
       const wallMs = Date.now();
-      const dt = frame.timeSincePreviousFrame;
+      const dt = _frame.timeSincePreviousFrame;
       const deltaMs = dt != null && dt > 0 && dt < 200 ? dt : 1000 / 60;
-
       const absZ = Math.abs(z);
-      const state = fsmStateSv.value;
 
-      if (state === FSM_IDLE) {
+      const fs0 = fStateSv.value;
+      if (fs0 === FSM_IDLE) {
         if (absZ > bumpTh) {
-          fsmStateSv.value = FSM_IMPACT;
-          impactStartMsSv.value = wallMs;
-          maxPeakZSv.value = absZ;
-          stableAccumMsSv.value = 0;
+          fStateSv.value = FSM_IMPACT;
+          fImpactMsSv.value = wallMs;
+          fPitchAtImpactSv.value = pitchDeg.value;
+          fMaxPeakSv.value = absZ;
+          fStableAccumSv.value = 0;
+          if (rStateSv.value === FSM_IDLE) {
+            rearKickAtMsSv.value = wallMs + rearHitDelayMsSpeed(speedKmH.value);
+          } else {
+            rearKickAtMsSv.value = 0;
+          }
         }
-        return;
-      }
-
-      if (state === FSM_IMPACT) {
-        if (absZ > maxPeakZSv.value) {
-          maxPeakZSv.value = absZ;
+      } else if (fs0 === FSM_IMPACT) {
+        if (absZ > fMaxPeakSv.value) {
+          fMaxPeakSv.value = absZ;
         }
         if (absZ < bumpTh) {
-          fsmStateSv.value = FSM_SETTLING;
-          settlingStartMsSv.value = wallMs;
-          bounceCountSv.value = 0;
-          prevZSv.value = z;
-          stableAccumMsSv.value = 0;
+          fStateSv.value = FSM_SETTLING;
+          fSettlingStartSv.value = wallMs;
+          fBouncesSv.value = 0;
+          fPrevZSv.value = z;
+          fStableAccumSv.value = 0;
         }
-        return;
-      }
-
-      // SETTLING
-      const prevZ = prevZSv.value;
-      if (Math.abs(prevZ) > zxEps * 0.5 && Math.abs(z) > zxEps * 0.5 && prevZ * z < 0) {
-        bounceCountSv.value += 1;
-      }
-      prevZSv.value = z;
-
-      if (absZ <= stableZ) {
-        stableAccumMsSv.value += deltaMs;
       } else {
-        stableAccumMsSv.value = 0;
+        const prevZf = fPrevZSv.value;
+        if (Math.abs(prevZf) > zxEps * 0.5 && Math.abs(z) > zxEps * 0.5 && prevZf * z < 0) {
+          fBouncesSv.value += 1;
+        }
+        fPrevZSv.value = z;
+
+        if (absZ <= stableZ) {
+          fStableAccumSv.value += deltaMs;
+        } else {
+          fStableAccumSv.value = 0;
+        }
+
+        const fSettlingStart = fSettlingStartSv.value;
+        if (wallMs - fSettlingStart > SETTLING_ABORT_MS) {
+          fStateSv.value = FSM_IDLE;
+          fMaxPeakSv.value = 0;
+          fBouncesSv.value = 0;
+          fStableAccumSv.value = 0;
+        } else if (fStableAccumSv.value >= holdMs) {
+          const settlingDurationMs = wallMs - fSettlingStart;
+          const peak = fMaxPeakSv.value;
+          const bounces = fBouncesSv.value;
+          const impactStart = fImpactMsSv.value;
+          const pitchN = pitchBiasNoteFromDeg(fPitchAtImpactSv.value);
+          const diagBase = evaluateDiagnostics(peak, bounces, settlingDurationMs, harshG, overMs);
+
+          runOnJS(emitFrontDoneJS)({
+            maxPeakZG: peak,
+            bounceCount: bounces,
+            impactStartMs: impactStart,
+            settlingDurationMs,
+            compressionAdvice: diagBase.compressionAdvice,
+            reboundAdvice: diagBase.reboundAdvice,
+            surfaceStatus: diagBase.surfaceStatus,
+            pitchBiasNote: pitchN,
+          });
+
+          fStateSv.value = FSM_IDLE;
+          fMaxPeakSv.value = 0;
+          fBouncesSv.value = 0;
+          fStableAccumSv.value = 0;
+        }
       }
 
-      const settlingStart = settlingStartMsSv.value;
-
-      if (wallMs - settlingStart > SETTLING_ABORT_MS) {
-        fsmStateSv.value = FSM_IDLE;
-        maxPeakZSv.value = 0;
-        bounceCountSv.value = 0;
-        stableAccumMsSv.value = 0;
-        return;
+      if (rStateSv.value === FSM_IDLE && rearKickAtMsSv.value > 0 && wallMs >= rearKickAtMsSv.value) {
+        rStateSv.value = FSM_IMPACT;
+        rearKickAtMsSv.value = 0;
+        rImpactMsSv.value = wallMs;
+        rMaxPeakSv.value = absZ;
+        rStableAccumSv.value = 0;
       }
 
-      const cms = speedKmH.value / 3.6;
-      let rearHitDelayMs;
-      rearHitDelayMs = (WHEELBASE_M / cms) * 1000;
+      const rs = rStateSv.value;
+      if (rs === FSM_IMPACT) {
+        if (absZ > rMaxPeakSv.value) {
+          rMaxPeakSv.value = absZ;
+        }
+        if (absZ < bumpTh) {
+          rStateSv.value = FSM_SETTLING;
+          rSettlingStartSv.value = wallMs;
+          rBouncesSv.value = 0;
+          rPrevZSv.value = z;
+          rStableAccumSv.value = 0;
+        }
+      } else if (rs === FSM_SETTLING) {
+        const prevZr = rPrevZSv.value;
+        if (Math.abs(prevZr) > zxEps * 0.5 && Math.abs(z) > zxEps * 0.5 && prevZr * z < 0) {
+          rBouncesSv.value += 1;
+        }
+        rPrevZSv.value = z;
 
-      const isForcedByRearHit = wallMs - impactStartMsSv.value >= rearHitDelayMs - 20;
-      const isStableByConfig = stableAccumMsSv.value >= holdMs;
+        if (absZ <= stableZ) {
+          rStableAccumSv.value += deltaMs;
+        } else {
+          rStableAccumSv.value = 0;
+        }
 
-      if (isStableByConfig || isForcedByRearHit) {
-        const settlingDurationMs = wallMs - settlingStart;
-        const peak = maxPeakZSv.value;
-        const bounces = bounceCountSv.value;
-        const impactStart = impactStartMsSv.value;
+        const rSettlingStart = rSettlingStartSv.value;
+        if (wallMs - rSettlingStart > SETTLING_ABORT_MS) {
+          rStateSv.value = FSM_IDLE;
+          rMaxPeakSv.value = 0;
+          rBouncesSv.value = 0;
+          rStableAccumSv.value = 0;
+        } else if (rStableAccumSv.value >= holdMs) {
+          const settlingDurationMs = wallMs - rSettlingStart;
+          const peak = rMaxPeakSv.value;
+          const bounces = rBouncesSv.value;
+          const impactStart = rImpactMsSv.value;
+          const diagBase = evaluateDiagnostics(peak, bounces, settlingDurationMs, harshG, overMs);
 
-        const diag = evaluateDiagnostics(peak, bounces, settlingDurationMs, harshG, overMs);
+          runOnJS(emitRearWithStoredFrontJS)({
+            maxPeakZG: peak,
+            bounceCount: bounces,
+            impactStartMs: impactStart,
+            settlingDurationMs,
+            compressionAdvice: diagBase.compressionAdvice,
+            reboundAdvice: diagBase.reboundAdvice,
+            surfaceStatus: diagBase.surfaceStatus,
+            pitchBiasNote: '',
+          });
 
-        runOnJS(dispatchBumpComplete)({
-          maxPeakZG: peak,
-          bounceCount: bounces,
-          impactStartMs: impactStart,
-          settlingDurationMs,
-          compressionAdvice: diag.compressionAdvice,
-          reboundAdvice: diag.reboundAdvice,
-          surfaceStatus: diag.surfaceStatus,
-        });
-
-        fsmStateSv.value = FSM_IDLE;
-        maxPeakZSv.value = 0;
-        bounceCountSv.value = 0;
-        stableAccumMsSv.value = 0;
+          rStateSv.value = FSM_IDLE;
+          rMaxPeakSv.value = 0;
+          rBouncesSv.value = 0;
+          rStableAccumSv.value = 0;
+        }
       }
     };
     return w;
   }, [
-    dispatchBumpComplete,
+    emitFrontDoneJS,
+    emitRearWithStoredFrontJS,
     hasCalib,
     vertZ,
+    pitchDeg,
     bumpThresholdG,
     stableZoneG,
     stableHoldMs,
@@ -236,25 +317,46 @@ export function useSuspensionBumpFsm({
   useFrameCallback(bumpWorklet);
 
   const resetBumpFsm = useCallback(() => {
+    lastFrontDiagRef.current = null;
     runOnUI(() => {
       'worklet';
-      fsmStateSv.value = FSM_IDLE;
-      maxPeakZSv.value = 0;
-      bounceCountSv.value = 0;
-      impactStartMsSv.value = 0;
-      settlingStartMsSv.value = 0;
-      prevZSv.value = 0;
-      stableAccumMsSv.value = 0;
+      fStateSv.value = FSM_IDLE;
+      fMaxPeakSv.value = 0;
+      fBouncesSv.value = 0;
+      fImpactMsSv.value = 0;
+      fSettlingStartSv.value = 0;
+      fPrevZSv.value = 0;
+      fStableAccumSv.value = 0;
+      fPitchAtImpactSv.value = 0;
+
+      rearKickAtMsSv.value = 0;
+
+      rStateSv.value = FSM_IDLE;
+      rMaxPeakSv.value = 0;
+      rBouncesSv.value = 0;
+      rImpactMsSv.value = 0;
+      rSettlingStartSv.value = 0;
+      rPrevZSv.value = 0;
+      rStableAccumSv.value = 0;
     })();
   }, [
-    bounceCountSv,
-    fsmStateSv,
-    impactStartMsSv,
-    maxPeakZSv,
-    prevZSv,
-    settlingStartMsSv,
-    stableAccumMsSv,
+    fStateSv,
+    fMaxPeakSv,
+    fBouncesSv,
+    fImpactMsSv,
+    fSettlingStartSv,
+    fPrevZSv,
+    fStableAccumSv,
+    fPitchAtImpactSv,
+    rearKickAtMsSv,
+    rStateSv,
+    rMaxPeakSv,
+    rBouncesSv,
+    rImpactMsSv,
+    rSettlingStartSv,
+    rPrevZSv,
+    rStableAccumSv,
   ]);
 
-  return { resetBumpFsm, impactStartMsSv };
+  return { resetBumpFsm };
 }

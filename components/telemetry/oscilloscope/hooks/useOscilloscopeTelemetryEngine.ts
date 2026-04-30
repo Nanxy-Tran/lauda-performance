@@ -20,12 +20,6 @@ import {
   SPEED_DISPLAY_ZERO_BELOW_KMH,
 } from '../constants';
 import {
-  DSP_ASSUMED_FS_HZ,
-  DSP_DRIFT_LPF_HZ,
-  DSP_ENGINE_LPF_CUT_HZ,
-  KALMAN_P0,
-  KALMAN_Q,
-  KALMAN_R,
   SENSOR_INTERVAL_MS_TARGET,
   TERRAIN_FLAT,
   TERRAIN_PAIR_WINDOW_MS,
@@ -35,36 +29,24 @@ import {
   TERRAIN_SPEED_BUMP,
   TERRAIN_SPEED_BUMP_NEG_G,
   TERRAIN_SPEED_BUMP_POS_G,
-  WHEELBASE_M,
-  onePoleAlpha,
 } from '../dspConstants';
 import { accelPitchRollDegAbsolute, displayWorldZG, hudTiltDisplayDeg } from '../sensorMath';
 import type { HudSnap } from '../types';
 import type { OscilloscopeSharedValues } from './useOscilloscopeSharedValues';
 
-/** Assumed Δt between displayed ring samples → wall-time mapping (`Date.now()` domain). */
-const SAMPLE_DT_MS = 1000 / DSP_ASSUMED_FS_HZ;
-
-function rearHitDelayMsResolved(speedKmH: number): number {
-  'worklet';
-  const currentSpeedMs = speedKmH / 3.6;
-  if (currentSpeedMs < 1) {
-    return 150;
-  }
-  return (WHEELBASE_M / currentSpeedMs) * 1000;
-}
-
-/** Full buffer spline for one lane (`midY` = vertical baseline of that lane). */
-function splineLaneFull(opts: {
+function splineTraceFromBuffer(opts: {
   buf: Float32Array;
   wi: number;
   delaySamples: number;
-  midY: number;
+  cw: number;
+  ch: number;
   amp: number;
   pxPerSample: number;
 }): SkPath {
   'worklet';
-  const { buf, wi, delaySamples, amp, pxPerSample, midY } = opts;
+  const { buf, wi, delaySamples, amp, pxPerSample } = opts;
+  void opts.cw;
+  const midY = opts.ch * 0.52;
   const delayed = delaySamples > 0;
 
   const xs = new Float32Array(BUFFER_LEN);
@@ -74,9 +56,7 @@ function splineLaneFull(opts: {
   for (let i = 0; i < BUFFER_LEN; i++) {
     let j: number;
     if (wi < BUFFER_LEN) {
-      if (i >= wi) {
-        continue;
-      }
+      if (i >= wi) continue;
       j = i;
     } else {
       j = (wi - BUFFER_LEN + i + BUFFER_LEN * 64) % BUFFER_LEN;
@@ -87,9 +67,7 @@ function splineLaneFull(opts: {
     }
     const v = buf[jr];
     const vx = pxPerSample * i;
-    if (!Number.isFinite(v)) {
-      continue;
-    }
+    if (!Number.isFinite(v)) continue;
     xs[n] = vx;
     ys[n] = midY - v * amp;
     n++;
@@ -151,70 +129,6 @@ function splineLaneFull(opts: {
   return p;
 }
 
-/** Only samples whose mapped wall-times fall `[winStart, winEnd]` (inclusive); gaps restart stroke. */
-function splineLaneWindowed(opts: {
-  buf: Float32Array;
-  wi: number;
-  delaySamples: number;
-  midY: number;
-  amp: number;
-  pxPerSample: number;
-  nowWall: number;
-  winStart: number;
-  winEnd: number;
-}): SkPath {
-  'worklet';
-  const { buf, wi, delaySamples, midY, amp, pxPerSample, nowWall, winStart, winEnd } = opts;
-  const delayed = delaySamples > 0;
-
-  const p = Skia.Path.Make();
-  let started = false;
-  let gap = false;
-
-  for (let i = 0; i < BUFFER_LEN; i++) {
-    let j: number;
-    if (wi < BUFFER_LEN) {
-      if (i >= wi) {
-        gap = true;
-        continue;
-      }
-      j = i;
-    } else {
-      j = (wi - BUFFER_LEN + i + BUFFER_LEN * 64) % BUFFER_LEN;
-    }
-    let jr = j;
-    if (delayed) {
-      jr = (j - delaySamples + BUFFER_LEN * 64) % BUFFER_LEN;
-    }
-    const vx = pxPerSample * i;
-    const samplesOlderThanNewest = (BUFFER_LEN - 1) - i;
-    const sampleWallMs = nowWall - samplesOlderThanNewest * SAMPLE_DT_MS;
-
-    const ve = buf[jr];
-    if (!Number.isFinite(ve)) {
-      gap = true;
-      continue;
-    }
-    const vy = midY - ve * amp;
-
-    const inWin = sampleWallMs >= winStart && sampleWallMs <= winEnd;
-    if (!inWin) {
-      gap = true;
-      continue;
-    }
-
-    if (!started || gap) {
-      p.moveTo(vx, vy);
-      started = true;
-      gap = false;
-    } else {
-      p.lineTo(vx, vy);
-    }
-  }
-
-  return p;
-}
-
 export function useAccelerometerStream(
   rawAx: OscilloscopeSharedValues['rawAx'],
   rawAy: OscilloscopeSharedValues['rawAy'],
@@ -257,8 +171,7 @@ export function useOscilloscopeTelemetryEngine(
   setAdvancedSettingsOpen: Dispatch<SetStateAction<boolean>>,
   sv: OscilloscopeSharedValues,
   isHfLoggingSv: SharedValue<number>,
-  appendHfData: (z: number, pitch: number, roll: number, speed: number) => void,
-  impactStartMsSv: SharedValue<number>
+  appendHfData: (z: number, pitch: number, roll: number, speed: number) => void
 ) {
   const [hud, setHud] = useState<HudSnap>({
     pitch: 0,
@@ -280,11 +193,6 @@ export function useOscilloscopeTelemetryEngine(
     gravUnitX,
     gravUnitY,
     gravUnitZ,
-    vertUserLpSv,
-    dspDriftLpSv,
-    dspRoadLpfSv,
-    dspKalmanXSv,
-    dspKalmanPSv,
     cleanVertZSv,
     hasCalibSv,
     vertFastAlphaSv,
@@ -308,7 +216,6 @@ export function useOscilloscopeTelemetryEngine(
     peakFifo2Sv,
     peakFifo3Sv,
     speedKmH,
-    lastAccelSampleWallMsSv,
     terrainKindSv,
     terrainSbStateSv,
     terrainSbPeakTimeSv,
@@ -337,8 +244,8 @@ export function useOscilloscopeTelemetryEngine(
   );
 
   /**
-   * UI-thread pipeline: linear Z → user EMA → drift strip → 25 Hz road band → 1D Kalman.
-   * Terrain signature on road-band signal; chart buffer = Kalman output.
+   * UI-thread pipeline: gravity-linear Z → preset-tunable EMA on `cleanVertZSv`.
+   * Terrain bumps/potholes and chart buffer track the same smoothed Δg signal.
    */
   useAnimatedReaction(
     () => ({
@@ -354,47 +261,19 @@ export function useOscilloscopeTelemetryEngine(
     (cur) => {
       'worklet';
       const now = Date.now();
-      const last = lastAccelSampleWallMsSv.value;
-      let fsEff = DSP_ASSUMED_FS_HZ;
-      if (last > 0) {
-        const dtMs = Math.min(50, Math.max(2, now - last));
-        fsEff = 1000 / dtMs;
-      }
-      lastAccelSampleWallMsSv.value = now;
-
-      const alphaDrift = onePoleAlpha(fsEff, DSP_DRIFT_LPF_HZ);
-      const alphaRoad = onePoleAlpha(fsEff, DSP_ENGINE_LPF_CUT_HZ);
 
       const bx = cur.ax;
       const by = cur.ay;
       const bz = cur.az;
-      const va = cur.vertFastAlpha;
 
       const z_total = bx * cur.gux + by * cur.guy + bz * cur.guz;
       const vert_z_raw = z_total - 1.0;
 
       if (cur.hasCalib === 1) {
-        vertUserLpSv.value = va * vert_z_raw + (1 - va) * vertUserLpSv.value;
+        const alpha = cur.vertFastAlpha;
+        cleanVertZSv.value = alpha * vert_z_raw + (1 - alpha) * cleanVertZSv.value;
 
-        dspDriftLpSv.value += alphaDrift * (vertUserLpSv.value - dspDriftLpSv.value);
-        const zHp = vertUserLpSv.value - dspDriftLpSv.value;
-
-        dspRoadLpfSv.value += alphaRoad * (zHp - dspRoadLpfSv.value);
-        const zRoad = dspRoadLpfSv.value;
-
-        let xk = dspKalmanXSv.value;
-        let Pk = dspKalmanPSv.value;
-        Pk += KALMAN_Q;
-        const K = Pk / (Pk + KALMAN_R);
-        const zMeas = zRoad;
-        xk += K * (zMeas - xk);
-        Pk *= 1 - K;
-        Pk = Math.max(1e-8, Math.min(Pk, 1e3));
-        dspKalmanXSv.value = xk;
-        dspKalmanPSv.value = Pk;
-        cleanVertZSv.value = xk;
-
-        const zt = zRoad;
+        const zt = cleanVertZSv.value;
         const win = TERRAIN_PAIR_WINDOW_MS;
 
         if (terrainSbStateSv.value === 0 && zt > TERRAIN_SPEED_BUMP_POS_G) {
@@ -427,11 +306,6 @@ export function useOscilloscopeTelemetryEngine(
           }
         }
       } else {
-        vertUserLpSv.value = 0;
-        dspDriftLpSv.value = 0;
-        dspRoadLpfSv.value = 0;
-        dspKalmanXSv.value = 0;
-        dspKalmanPSv.value = KALMAN_P0;
         cleanVertZSv.value = 0;
         terrainSbStateSv.value = 0;
         terrainPhStateSv.value = 0;
@@ -554,18 +428,16 @@ export function useOscilloscopeTelemetryEngine(
 
   useFrameCallback(terrainOverlayFrame);
 
-  /** Advances every frame so dual-trace window clipping tracks wall-clock `Date.now()`. */
-  const dualTraceClockSv = useSharedValue(0);
-  const dualTraceClockFrame = useMemo(() => () => {
+  const chartRedrawSv = useSharedValue(0);
+  const chartRedrawFrame = useMemo(() => () => {
     'worklet';
-    dualTraceClockSv.value = (dualTraceClockSv.value + 1) % 1e9;
+    chartRedrawSv.value = (chartRedrawSv.value + 1) % 1e9;
   }, []);
-  useFrameCallback(dualTraceClockFrame);
+  useFrameCallback(chartRedrawFrame);
 
   const gridPath = useDerivedValue(() => {
     'worklet';
-    const tick = sampleTick.value;
-    void tick;
+    void sampleTick.value;
     const w = chartWsv.value;
     const h = chartHsv.value;
     const p = Skia.Path.Make();
@@ -584,131 +456,35 @@ export function useOscilloscopeTelemetryEngine(
     return p;
   });
 
-  /** Dual traces: baseline at H/4 (front fork) and 3H/4 (rear shock). */
   const baselinePath = useDerivedValue(() => {
     'worklet';
     void sampleTick.value;
     const ch = chartHsv.value;
     const cw = chartWsv.value;
-    const yFront = ch * 0.25;
-    const yRear = (ch * 3) / 4;
+    const midY = ch * 0.52;
     const path = Skia.Path.Make();
-    path.moveTo(0, yFront);
-    path.lineTo(cw, yFront);
-    path.moveTo(0, yRear);
-    path.lineTo(cw, yRear);
+    path.moveTo(0, midY);
+    path.lineTo(cw, midY);
     return path;
   });
 
-  /** Dim full buffer — front axle (Kalman Z), lane center H/4. */
-  const frontBaseTrace = useDerivedValue(() => {
+  const oscilloscopePath = useDerivedValue(() => {
     'worklet';
-    void dualTraceClockSv.value;
+    void chartRedrawSv.value;
     void sampleTick.value;
-    const ch = chartHsv.value;
     const cw = chartWsv.value;
+    const ch = chartHsv.value;
     void sensitivityMultiplierSv.value;
-    const midYFront = ch * 0.25;
-    const amp = (ch / 4) * 0.85 * sensitivityMultiplierSv.value;
     const pxPerSample = BUFFER_LEN > 1 ? cw / (BUFFER_LEN - 1) : cw;
-    return splineLaneFull({
+    const amp = ch * 0.42 * 1.05 * sensitivityMultiplierSv.value;
+    return splineTraceFromBuffer({
       buf: waveData.value,
       wi: writeIdxSv.value,
       delaySamples: 0,
-      midY: midYFront,
+      cw,
+      ch,
       amp,
       pxPerSample,
-    });
-  });
-
-  /** FSM `[impactStart, impactStart+500ms]` — bright front highlight. */
-  const frontActiveTrace = useDerivedValue(() => {
-    'worklet';
-    void dualTraceClockSv.value;
-    void sampleTick.value;
-    const impactBase = impactStartMsSv.value;
-    if (impactBase <= 0) {
-      return Skia.Path.Make();
-    }
-    const ch = chartHsv.value;
-    const cw = chartWsv.value;
-    void sensitivityMultiplierSv.value;
-    const midYFront = ch * 0.25;
-    const amp = (ch / 4) * 0.85 * sensitivityMultiplierSv.value;
-    const pxPerSample = BUFFER_LEN > 1 ? cw / (BUFFER_LEN - 1) : cw;
-    const nowWall = Date.now();
-    return splineLaneWindowed({
-      buf: waveData.value,
-      wi: writeIdxSv.value,
-      delaySamples: 0,
-      midY: midYFront,
-      amp,
-      pxPerSample,
-      nowWall,
-      winStart: impactBase,
-      winEnd: impactBase + 500,
-    });
-  });
-
-  /** Dim delayed buffer — rear axle; lane center 3H/4. Desk dev: `<1 m/s` uses 150 ms propagation (≈38 km/h). */
-  const rearBaseTrace = useDerivedValue(() => {
-    'worklet';
-    void dualTraceClockSv.value;
-    void sampleTick.value;
-    const ch = chartHsv.value;
-    const cw = chartWsv.value;
-    const spd = speedKmH.value;
-    void sensitivityMultiplierSv.value;
-    const dms = rearHitDelayMsResolved(spd);
-    const delaySamples = Math.min(
-      BUFFER_LEN - 1,
-      Math.max(1, Math.round((dms / 1000) * DSP_ASSUMED_FS_HZ))
-    );
-    const midYRear = (ch * 3) / 4;
-    const amp = (ch / 4) * 0.85 * sensitivityMultiplierSv.value;
-    const pxPerSample = BUFFER_LEN > 1 ? cw / (BUFFER_LEN - 1) : cw;
-    return splineLaneFull({
-      buf: waveData.value,
-      wi: writeIdxSv.value,
-      delaySamples,
-      midY: midYRear,
-      amp,
-      pxPerSample,
-    });
-  });
-
-  /** Rear window `[impact + rearDelay −50ms, impact + rearDelay + 500ms]` on delayed signal. */
-  const rearActiveTrace = useDerivedValue(() => {
-    'worklet';
-    void dualTraceClockSv.value;
-    void sampleTick.value;
-    const impactBase = impactStartMsSv.value;
-    if (impactBase <= 0) {
-      return Skia.Path.Make();
-    }
-    const ch = chartHsv.value;
-    const cw = chartWsv.value;
-    const spd = speedKmH.value;
-    void sensitivityMultiplierSv.value;
-    const rearHitDelayMs = rearHitDelayMsResolved(spd);
-    const delaySamples = Math.min(
-      BUFFER_LEN - 1,
-      Math.max(1, Math.round((rearHitDelayMs / 1000) * DSP_ASSUMED_FS_HZ))
-    );
-    const midYRear = (ch * 3) / 4;
-    const amp = (ch / 4) * 0.85 * sensitivityMultiplierSv.value;
-    const pxPerSample = BUFFER_LEN > 1 ? cw / (BUFFER_LEN - 1) : cw;
-    const nowWall = Date.now();
-    return splineLaneWindowed({
-      buf: waveData.value,
-      wi: writeIdxSv.value,
-      delaySamples,
-      midY: midYRear,
-      amp,
-      pxPerSample,
-      nowWall,
-      winStart: impactBase + rearHitDelayMs - 50,
-      winEnd: impactBase + rearHitDelayMs + 500,
     });
   });
 
@@ -717,10 +493,7 @@ export function useOscilloscopeTelemetryEngine(
     onChartLayout,
     gridPath,
     baselinePath,
-    frontBaseTrace,
-    frontActiveTrace,
-    rearBaseTrace,
-    rearActiveTrace,
+    oscilloscopePath,
     terrainKindSv,
     terrainOverlayOpacitySv,
   };

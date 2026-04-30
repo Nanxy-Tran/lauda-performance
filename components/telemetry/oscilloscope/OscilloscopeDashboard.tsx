@@ -2,15 +2,16 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import React from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 
-import { DspTuningSliders } from '../DspTuningSliders';
+import { AxisBumpAdviceCard } from './AxisBumpAdviceCard';
 import { GpsTrackLogger } from '../GpsTrackLogger';
+import { OscilloscopeSettingsDrawer } from './OscilloscopeSettingsDrawer';
 import type { TelemetryPresetId, TelemetryPresetMode } from '../telemetryPresets';
 import { HudMetricTile } from './HudMetricTile';
-import { SuspensionBumpDiagCard } from './SuspensionBumpDiagCard';
-import { styles } from './styles';
 import type { HudSnap } from './types';
-import type { OscilloscopeSharedValues } from './hooks/useOscilloscopeSharedValues';
+import type { PerformanceResult } from '../usePerformanceAnalyzer';
 import type { SuspensionBumpDiagResult } from '../useSuspensionBumpFsm';
+import type { OscilloscopeSharedValues } from './hooks/useOscilloscopeSharedValues';
+import { styles } from './styles';
 
 export type OscilloscopeDashboardProps = {
   mono: string;
@@ -24,7 +25,8 @@ export type OscilloscopeDashboardProps = {
 
   hud: HudSnap;
 
-  bumpDiag: SuspensionBumpDiagResult | null;
+  frontBumpDiag: SuspensionBumpDiagResult | null;
+  rearBumpDiag: SuspensionBumpDiagResult | null;
 
   telemetryPresetMode: TelemetryPresetMode;
   telemetryPresetLabel: string;
@@ -41,6 +43,8 @@ export type OscilloscopeDashboardProps = {
   isHfLogging: boolean;
   toggleHfLog: () => void;
   exportToJSON: () => void;
+
+  performanceResult: PerformanceResult | null;
 };
 
 export function OscilloscopeDashboard({
@@ -51,7 +55,8 @@ export function OscilloscopeDashboard({
   advancedSettingsOpen,
   setAdvancedSettingsOpen,
   hud,
-  bumpDiag,
+  frontBumpDiag,
+  rearBumpDiag,
   telemetryPresetMode,
   telemetryPresetLabel,
   selectTelemetryPreset,
@@ -64,24 +69,16 @@ export function OscilloscopeDashboard({
   isHfLogging,
   toggleHfLog,
   exportToJSON,
+  performanceResult,
 }: OscilloscopeDashboardProps) {
-  const {
-    speedKmH,
-    vertFastAlphaSv,
-    sensitivityMultiplierSv,
-    bumpThresholdGsv,
-    stableZoneGsv,
-    stableHoldMssv,
-    harshPeakGsv,
-    overdampedSettlingMssv,
-    zeroCrossEpsGsv,
-    dspPeakVertZSv,
-    dspPitchDeg,
-    dspRollDeg,
-  } = sv;
+  const { speedKmH, dspPeakVertZSv, dspPitchDeg, dspRollDeg } = sv;
+
+  const rearWaitingPlaceholder =
+    frontBumpDiag !== null && rearBumpDiag === null ? 'Waiting for rear impact…' : null;
 
   return (
-    <ScrollView style={[styles.bottomPanel]} contentContainerStyle={{ paddingBottom: 12 + bottomInsetPad }}>
+    <>
+      <ScrollView style={[styles.bottomPanel]} contentContainerStyle={{ paddingBottom: 12 + bottomInsetPad }}>
       <View style={styles.hudTopBar}>
         <View style={styles.logoCluster}>
           <Text style={[styles.logo, { fontFamily: mono }]}>LAUDA Performance</Text>
@@ -105,9 +102,9 @@ export function OscilloscopeDashboard({
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Toggle advanced filter settings"
+            accessibilityLabel="Open advanced filter settings"
             disabled={dashLocked}
-            onPress={() => !dashLocked && setAdvancedSettingsOpen((v) => !v)}
+            onPress={() => !dashLocked && setAdvancedSettingsOpen(true)}
             style={({ pressed }) => [
               styles.toolBtn,
               dashLocked && styles.toolBtnDisabled,
@@ -202,40 +199,50 @@ export function OscilloscopeDashboard({
         </View>
 
         <View style={styles.hudSection}>
-          <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Suspension · bump</Text>
-          <SuspensionBumpDiagCard diag={bumpDiag} mono={mono} />
+          <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Performance</Text>
+          <View style={styles.performanceCard}>
+            <Text style={[styles.performanceCardTitle, { fontFamily: mono }]}>RECENT</Text>
+            <Text style={[styles.performanceCardMetric, { fontFamily: mono }]}>
+              {performanceResult
+                ? performanceResult.type === 'ACCEL'
+                  ? `0-60 km/h: ${performanceResult.timeSeconds.toFixed(2)} sec (Squat: +${performanceResult.maxPitchDeg.toFixed(1)}°)`
+                  : `60-0 km/h: ${performanceResult.distanceMeters.toFixed(2)} meters (Dive: ${performanceResult.maxPitchDeg.toFixed(1)}°)`
+                : 'Idle — auto-detects squat launch (0-60) or dive braking (60-0).'}
+            </Text>
+            <Text style={[styles.performanceHint, { fontFamily: mono }]}>
+              Tab Analyzer for full lab. GPS speed + CAL required.
+            </Text>
+          </View>
         </View>
 
         <View style={styles.hudSection}>
-          <View style={styles.hudMetricRow}>
-            <HudMetricTile label="Roll left" value={hud.peakRollLeft.toFixed(1)} suffix="°" mono={mono} />
-            <HudMetricTile label="Roll right" value={hud.peakRollRight.toFixed(1)} suffix="°" mono={mono} />
-            <HudMetricTile label="Peak Vert Z" value={hud.peakVertZ.toFixed(2)} suffix="g" mono={mono} />
+          <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Suspension · dual axis</Text>
+          <View style={styles.bumpAdviceRowDual}>
+            <AxisBumpAdviceCard
+              axisTitle="Front Fork"
+              diag={frontBumpDiag}
+              mono={mono}
+              showPitchBadge
+              rearWaitingPlaceholder={null}
+            />
+            <AxisBumpAdviceCard
+              axisTitle="Rear Shock"
+              diag={rearBumpDiag}
+              mono={mono}
+              showPitchBadge={false}
+              rearWaitingPlaceholder={rearWaitingPlaceholder}
+            />
           </View>
         </View>
-      </View>
 
-      {advancedSettingsOpen && !dashLocked ? (
-        <View style={styles.advancedPanel}>
-          <Text style={[styles.advancedTitle, { fontFamily: mono }]}>
-            DSP · FSM LIVE TUNING · 1200cc @ ~45 km/h baseline
-          </Text>
-          <DspTuningSliders
-            mono={mono}
-            visible={advancedSettingsOpen && !dashLocked}
-            vertFastAlphaSv={vertFastAlphaSv}
-            sensitivityMultiplierSv={sensitivityMultiplierSv}
-            bumpThresholdG={bumpThresholdGsv}
-            stableZoneG={stableZoneGsv}
-            stableHoldMs={stableHoldMssv}
-            harshPeakG={harshPeakGsv}
-            overdampedSettlingMs={overdampedSettlingMssv}
-            zeroCrossEpsG={zeroCrossEpsGsv}
-            onUserTune={() => setTelemetryPresetMode('custom')}
-            externalSyncNonce={dspPresetSyncNonce}
-          />
-        </View>
-      ) : null}
+        {/*<View style={styles.hudSection}>*/}
+        {/*  <View style={styles.hudMetricRow}>*/}
+        {/*    <HudMetricTile label="Roll left" value={hud.peakRollLeft.toFixed(1)} suffix="°" mono={mono} />*/}
+        {/*    <HudMetricTile label="Roll right" value={hud.peakRollRight.toFixed(1)} suffix="°" mono={mono} />*/}
+        {/*    <HudMetricTile label="Peak Vert Z" value={hud.peakVertZ.toFixed(2)} suffix="g" mono={mono} />*/}
+        {/*  </View>*/}
+        {/*</View>*/}
+      </View>
 
       <View style={styles.calRow}>
         <Pressable
@@ -264,6 +271,9 @@ export function OscilloscopeDashboard({
           accessibilityLabel="Instant calibration: snap vertical axis to zero using current gravity. Long press to open filter settings."
           disabled={calUiBanner !== null}
           onPress={instantCalibrate}
+          onLongPress={() => {
+            if (!dashLocked && calUiBanner === null) setAdvancedSettingsOpen(true);
+          }}
           delayLongPress={450}
           style={() => [styles.calBtn, calUiBanner !== null && styles.calBtnDisabled]}
         >
@@ -304,5 +314,14 @@ export function OscilloscopeDashboard({
         </Pressable>
       </View>
     </ScrollView>
+      <OscilloscopeSettingsDrawer
+        visible={advancedSettingsOpen && !dashLocked}
+        onClose={() => setAdvancedSettingsOpen(false)}
+        mono={mono}
+        sv={sv}
+        dspPresetSyncNonce={dspPresetSyncNonce}
+        setTelemetryPresetMode={setTelemetryPresetMode}
+      />
+    </>
   );
 }

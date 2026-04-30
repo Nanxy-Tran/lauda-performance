@@ -2,20 +2,22 @@ import { useCallback } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { runOnUI } from 'react-native-reanimated';
 
-import type { SuspensionBumpDiagResult } from '../../useSuspensionBumpFsm';
-
 import { accelPitchRollDegAbsolute, displayWorldZG } from '../sensorMath';
-import { KALMAN_P0 } from '../dspConstants';
 import type { OscilloscopeSharedValues } from './useOscilloscopeSharedValues';
 
 type CalibrationParams = {
   sv: OscilloscopeSharedValues;
   resetBumpFsm: () => void;
-  setBumpDiag: Dispatch<SetStateAction<SuspensionBumpDiagResult | null>>;
+  clearBumpDiagnostics: () => void;
   setCalUiBanner: Dispatch<SetStateAction<string | null>>;
 };
 
-export function useOscilloscopeCalibration({ sv, resetBumpFsm, setBumpDiag, setCalUiBanner }: CalibrationParams) {
+export function useOscilloscopeCalibration({
+  sv,
+  resetBumpFsm,
+  clearBumpDiagnostics,
+  setCalUiBanner,
+}: CalibrationParams) {
   const {
     rawAx,
     rawAy,
@@ -24,11 +26,6 @@ export function useOscilloscopeCalibration({ sv, resetBumpFsm, setBumpDiag, setC
     gravUnitY,
     gravUnitZ,
     cleanVertZSv,
-    vertUserLpSv,
-    dspDriftLpSv,
-    dspRoadLpfSv,
-    dspKalmanXSv,
-    dspKalmanPSv,
     hasCalibSv,
     dspPeakG,
     peakFifo0Sv,
@@ -48,7 +45,6 @@ export function useOscilloscopeCalibration({ sv, resetBumpFsm, setBumpDiag, setC
     writeIdxSv,
     sampleTick,
     hudDisplayZSv,
-    lastAccelSampleWallMsSv,
     terrainKindSv,
     terrainSbStateSv,
     terrainSbPeakTimeSv,
@@ -78,12 +74,6 @@ export function useOscilloscopeCalibration({ sv, resetBumpFsm, setBumpDiag, setC
       }
 
       cleanVertZSv.value = 0;
-      vertUserLpSv.value = 0;
-      dspDriftLpSv.value = 0;
-      dspRoadLpfSv.value = 0;
-      dspKalmanXSv.value = 0;
-      dspKalmanPSv.value = KALMAN_P0;
-      lastAccelSampleWallMsSv.value = 0;
       terrainKindSv.value = 0;
       terrainSbStateSv.value = 0;
       terrainSbPeakTimeSv.value = 0;
@@ -120,7 +110,7 @@ export function useOscilloscopeCalibration({ sv, resetBumpFsm, setBumpDiag, setC
     })();
     flashCalBanner();
     resetBumpFsm();
-    setBumpDiag(null);
+    clearBumpDiagnostics();
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [flashCalBanner, resetBumpFsm]);
 

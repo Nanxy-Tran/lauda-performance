@@ -1,11 +1,16 @@
 import Slider from '@react-native-community/slider';
 import React, { useCallback, useEffect, useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView as RNScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView as GestureScrollView } from 'react-native-gesture-handler';
 import type { SharedValue } from 'react-native-reanimated';
+
+/** `panel`: fixed max height inside another scroll surface. `sheet`: flex fill (e.g. modal drawer). */
+export type DspTuningPresentation = 'panel' | 'sheet';
 
 export type DspTuningSlidersProps = {
   mono: string;
   visible: boolean;
+  presentation?: DspTuningPresentation;
   vertFastAlphaSv: SharedValue<number>;
   sensitivityMultiplierSv: SharedValue<number>;
   bumpThresholdG: SharedValue<number>;
@@ -34,6 +39,7 @@ type TuneKey =
 export function DspTuningSliders({
   mono,
   visible,
+  presentation = 'panel',
   vertFastAlphaSv,
   sensitivityMultiplierSv,
   bumpThresholdG,
@@ -176,11 +182,14 @@ export function DspTuningSliders({
     },
   ];
 
+  const isSheet = presentation === 'sheet';
+  const ScrollCmp = isSheet ? GestureScrollView : RNScrollView;
+
   return (
-    <ScrollView
-      nestedScrollEnabled
-      style={styles.scroll}
-      contentContainerStyle={styles.scrollContent}
+    <ScrollCmp
+      nestedScrollEnabled={!isSheet}
+      style={isSheet ? styles.scrollSheet : styles.scroll}
+      contentContainerStyle={isSheet ? styles.scrollContentSheet : styles.scrollContent}
       keyboardShouldPersistTaps="handled"
     >
       {ROWS.map((row) => (
@@ -204,7 +213,7 @@ export function DspTuningSliders({
           />
         </View>
       ))}
-    </ScrollView>
+    </ScrollCmp>
   );
 }
 
@@ -213,9 +222,18 @@ const styles = StyleSheet.create({
     maxHeight: 340,
     width: '100%',
   },
+  scrollSheet: {
+    flex: 1,
+    width: '100%',
+  },
   scrollContent: {
     paddingBottom: 8,
     gap: 4,
+  },
+  scrollContentSheet: {
+    paddingBottom: 4,
+    gap: 4,
+    flexGrow: 1,
   },
   row: {
     marginBottom: 10,

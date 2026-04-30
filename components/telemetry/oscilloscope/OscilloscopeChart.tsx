@@ -4,7 +4,7 @@ import Animated, { useAnimatedStyle } from 'react-native-reanimated';
 import type { SharedValue } from 'react-native-reanimated';
 import { Canvas, Fill, Path, type SkPath } from '@shopify/react-native-skia';
 
-import { REAR_TRACE_COLOR, TERRAIN_POTHOLE, TERRAIN_SPEED_BUMP } from './dspConstants';
+import { TERRAIN_POTHOLE, TERRAIN_SPEED_BUMP } from './dspConstants';
 import { styles } from './styles';
 
 const FRONT_GREEN = '#34ff94';
@@ -12,10 +12,7 @@ const FRONT_GREEN = '#34ff94';
 export type OscilloscopeChartProps = {
   gridPath: SharedValue<SkPath>;
   baselinePath: SharedValue<SkPath>;
-  frontBaseTrace: SharedValue<SkPath>;
-  frontActiveTrace: SharedValue<SkPath>;
-  rearBaseTrace: SharedValue<SkPath>;
-  rearActiveTrace: SharedValue<SkPath>;
+  oscilloscopePath: SharedValue<SkPath>;
   terrainKindSv: SharedValue<number>;
   terrainOverlayOpacitySv: SharedValue<number>;
   onLayout: (e: LayoutChangeEvent) => void;
@@ -26,10 +23,7 @@ export type OscilloscopeChartProps = {
 export function OscilloscopeChart({
   gridPath,
   baselinePath,
-  frontBaseTrace,
-  frontActiveTrace,
-  rearBaseTrace,
-  rearActiveTrace,
+  oscilloscopePath,
   terrainKindSv,
   terrainOverlayOpacitySv,
   onLayout,
@@ -60,38 +54,11 @@ export function OscilloscopeChart({
         <Fill color="#010101" />
         <Path style="stroke" path={gridPath} color="#242424" strokeWidth={1} strokeCap="square" />
         <Path style="stroke" path={baselinePath} color="#173d2f" strokeWidth={1} strokeCap="round" />
-        {/* Front fork — muted context */}
         <Path
           style="stroke"
-          path={frontBaseTrace}
+          path={oscilloscopePath}
           color={FRONT_GREEN}
-          strokeWidth={1.15}
-          strokeJoin="round"
-          strokeCap="round"
-        />
-        {/* Rear shock — muted context */}
-        <Path
-          style="stroke"
-          path={rearBaseTrace}
-          color={REAR_TRACE_COLOR}
-          strokeWidth={1.15}
-          strokeJoin="round"
-          strokeCap="round"
-        />
-        {/* FSM-highlighted traces */}
-        <Path
-          style="stroke"
-          path={frontActiveTrace}
-          color={FRONT_GREEN}
-          strokeWidth={2.85}
-          strokeJoin="round"
-          strokeCap="round"
-        />
-        <Path
-          style="stroke"
-          path={rearActiveTrace}
-          color={REAR_TRACE_COLOR}
-          strokeWidth={2.85}
+          strokeWidth={2.35}
           strokeJoin="round"
           strokeCap="round"
         />

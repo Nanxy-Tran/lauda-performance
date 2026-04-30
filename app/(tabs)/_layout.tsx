@@ -23,6 +23,13 @@ export default function TabLayout() {
           tabBarIcon: ({ color }) => <IconSymbol size={28} name="waveform.path.ecg" color={color} />,
         }}
       />
+      <Tabs.Screen
+        name="performance"
+        options={{
+          title: 'Analyzer',
+          tabBarIcon: ({ color }) => <IconSymbol size={28} name="stopwatch.fill" color={color} />,
+        }}
+      />
     </Tabs>
   );
 }

@@ -23,6 +23,7 @@ import { styles } from './oscilloscope/styles';
 import { useOscilloscopeCalibration } from './oscilloscope/hooks/useOscilloscopeCalibration';
 import { useOscilloscopeSharedValues } from './oscilloscope/hooks/useOscilloscopeSharedValues';
 import { useOscilloscopeTelemetryEngine } from './oscilloscope/hooks/useOscilloscopeTelemetryEngine';
+import { usePerformanceAnalyzer } from './usePerformanceAnalyzer';
 
 export default function OscilloscopeView() {
   const { width: winW, height: winH } = useWindowDimensions();
@@ -74,7 +75,8 @@ export default function OscilloscopeView() {
   const [calUiBanner, setCalUiBanner] = useState<string | null>(null);
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [dashLocked, setDashLocked] = useState(false);
-  const [bumpDiag, setBumpDiag] = useState<SuspensionBumpDiagResult | null>(null);
+  const [frontBumpDiag, setFrontBumpDiag] = useState<SuspensionBumpDiagResult | null>(null);
+  const [rearBumpDiag, setRearBumpDiag] = useState<SuspensionBumpDiagResult | null>(null);
   const [telemetryPresetMode, setTelemetryPresetMode] = useState<TelemetryPresetMode>('HIGH_SPEED_IMPACT');
   const [dspPresetSyncNonce, setDspPresetSyncNonce] = useState(0);
 
@@ -131,8 +133,17 @@ export default function OscilloscopeView() {
     vertFastAlphaSv,
   ]);
 
-  const onBumpEventComplete = useCallback((result: SuspensionBumpDiagResult) => {
-    setBumpDiag(result);
+  const onDiagnosticsReady = useCallback(
+    (front: SuspensionBumpDiagResult, rear: SuspensionBumpDiagResult | null) => {
+      setFrontBumpDiag(front);
+      setRearBumpDiag(rear);
+    },
+    []
+  );
+
+  const clearBumpDiagnostics = useCallback(() => {
+    setFrontBumpDiag(null);
+    setRearBumpDiag(null);
   }, []);
 
   const selectTelemetryPreset = useCallback(
@@ -163,10 +174,11 @@ export default function OscilloscopeView() {
   const telemetryPresetLabel =
     telemetryPresetMode === 'custom' ? 'Custom DSP' : TELEMETRY_PRESETS[telemetryPresetMode].name;
 
-  const { resetBumpFsm, impactStartMsSv } = useSuspensionBumpFsm({
+  const { resetBumpFsm } = useSuspensionBumpFsm({
     vertZ: cleanVertZSv,
     hasCalib: hasCalibSv,
-    onBumpComplete: onBumpEventComplete,
+    pitchDeg: sv.dspPitchDeg,
+    onDiagnosticsReady,
     bumpThresholdG: bumpThresholdGsv,
     stableZoneG: stableZoneGsv,
     stableHoldMs: stableHoldMssv,
@@ -181,10 +193,7 @@ export default function OscilloscopeView() {
     onChartLayout,
     gridPath,
     baselinePath,
-    frontBaseTrace,
-    frontActiveTrace,
-    rearBaseTrace,
-    rearActiveTrace,
+    oscilloscopePath,
     terrainKindSv,
     terrainOverlayOpacitySv,
   } = useOscilloscopeTelemetryEngine(
@@ -194,14 +203,19 @@ export default function OscilloscopeView() {
     setAdvancedSettingsOpen,
     sv,
     isHfLoggingSv,
-    appendHfData,
-    impactStartMsSv
+    appendHfData
   );
+
+  const { latestResult: performanceLatest } = usePerformanceAnalyzer({
+    speedKmH: sv.speedKmH,
+    pitchDeg: sv.dspPitchDeg,
+    hasCalibSv: sv.hasCalibSv,
+  });
 
   const { instantCalibrate, resetPeakMax } = useOscilloscopeCalibration({
     sv,
     resetBumpFsm,
-    setBumpDiag,
+    clearBumpDiagnostics,
     setCalUiBanner,
   });
 
@@ -210,10 +224,7 @@ export default function OscilloscopeView() {
       <OscilloscopeChart
         gridPath={gridPath}
         baselinePath={baselinePath}
-        frontBaseTrace={frontBaseTrace}
-        frontActiveTrace={frontActiveTrace}
-        rearBaseTrace={rearBaseTrace}
-        rearActiveTrace={rearActiveTrace}
+        oscilloscopePath={oscilloscopePath}
         terrainKindSv={terrainKindSv}
         terrainOverlayOpacitySv={terrainOverlayOpacitySv}
         onLayout={onChartLayout}
@@ -229,7 +240,8 @@ export default function OscilloscopeView() {
         advancedSettingsOpen={advancedSettingsOpen}
         setAdvancedSettingsOpen={setAdvancedSettingsOpen}
         hud={hud}
-        bumpDiag={bumpDiag}
+        frontBumpDiag={frontBumpDiag}
+        rearBumpDiag={rearBumpDiag}
         telemetryPresetMode={telemetryPresetMode}
         telemetryPresetLabel={telemetryPresetLabel}
         selectTelemetryPreset={selectTelemetryPreset}
@@ -242,6 +254,7 @@ export default function OscilloscopeView() {
         isHfLogging={isHfLogging}
         toggleHfLog={toggleHfLog}
         exportToJSON={exportToJSON}
+        performanceResult={performanceLatest}
       />
     </View>
   );

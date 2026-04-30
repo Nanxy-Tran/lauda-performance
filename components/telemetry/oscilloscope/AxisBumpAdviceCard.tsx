@@ -5,18 +5,32 @@ import type { SuspensionBumpDiagResult } from '../useSuspensionBumpFsm';
 import { surfaceStatusLabel, suspensionChipPresentation } from './bumpDiagPresentation';
 import { styles } from './styles';
 
-export function SuspensionBumpDiagCard({
-  diag,
-  mono,
-}: {
+type AxisBumpAdviceCardProps = {
+  axisTitle: string;
   diag: SuspensionBumpDiagResult | null;
   mono: string;
-}) {
-  if (!diag) {
+  showPitchBadge: boolean;
+  rearWaitingPlaceholder: string | null;
+};
+
+/** Single-axis bump diagnostics (Fork or Shock). */
+export function AxisBumpAdviceCard({
+  axisTitle,
+  diag,
+  mono,
+  showPitchBadge,
+  rearWaitingPlaceholder,
+}: AxisBumpAdviceCardProps) {
+  const showWaiting = rearWaitingPlaceholder != null && diag === null;
+
+  if (diag === null) {
     return (
-      <View style={styles.bumpDiagCard}>
+      <View style={[styles.bumpDiagCard, styles.bumpAxisCardHalf]}>
+        <Text style={[styles.axisBumpCardTitle, { fontFamily: mono }]}>{axisTitle}</Text>
         <Text style={[styles.bumpDiagPlaceholder, { fontFamily: mono }]}>
-          Hit a bump above 0.8 g (after CAL); tuning advice appears when the trace settles (±0.15 g for 150 ms).
+          {showWaiting
+            ? rearWaitingPlaceholder
+            : 'Hit a bump after CAL · advice lands when settling holds.'}
         </Text>
       </View>
     );
@@ -24,7 +38,15 @@ export function SuspensionBumpDiagCard({
 
   const ss = suspensionChipPresentation(diag.surfaceStatus);
   return (
-    <View style={styles.bumpDiagCard}>
+    <View style={[styles.bumpDiagCard, styles.bumpAxisCardHalf]}>
+      <Text style={[styles.axisBumpCardTitle, { fontFamily: mono }]}>{axisTitle}</Text>
+
+      {showPitchBadge ? (
+        <View style={styles.pitchBiasBadge}>
+          <Text style={[styles.pitchBiasBadgeText, { fontFamily: mono }]}>{diag.pitchBiasNote}</Text>
+        </View>
+      ) : null}
+
       <View style={styles.bumpDiagHeadRow}>
         <View style={[styles.bumpStatusChip, { borderColor: ss.chipBorder, backgroundColor: ss.chipBg }]}>
           <Text style={[styles.bumpStatusChipTxt, { fontFamily: mono, color: ss.chipText }]}>
