@@ -52,6 +52,12 @@
             "backgroundColor": "#000000"
           }
         }
+      ],
+      [
+        "@config-plugins/react-native-ble-plx",
+        {
+          "bluetoothAlwaysPermission": "LaudaPerformance uses Bluetooth to connect to your OBD-II adapter (e.g. Vgate iCar) for live ECU telemetry."
+        }
       ]
     ],
     "experiments": {

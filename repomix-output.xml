@@ -1,0 +1,4588 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: components
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+components/
+  telemetry/
+    oscilloscope/
+      hooks/
+        useOscilloscopeCalibration.ts
+        useOscilloscopeSharedValues.ts
+        useOscilloscopeTelemetryEngine.ts
+      AxisBumpAdviceCard.tsx
+      bumpDiagPresentation.ts
+      constants.ts
+      dspConstants.ts
+      HudMetricTile.tsx
+      OscilloscopeChart.tsx
+      OscilloscopeDashboard.tsx
+      OscilloscopeSettingsDrawer.tsx
+      sensorMath.ts
+      styles.ts
+      types.ts
+    DspTuningSliders.tsx
+    EcuDashboard.tsx
+    GpsTrackLogger.tsx
+    OscilloscopeView.tsx
+    PerformanceAnalyzerView.tsx
+    telemetryPresets.ts
+    useForegroundGpsStream.ts
+    usePerformanceAnalyzer.ts
+    useSuspensionBumpFsm.ts
+  ui/
+    icon-symbol.ios.tsx
+    icon-symbol.tsx
+  app-error-boundary.tsx
+  haptic-tab.tsx
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="components/telemetry/EcuDashboard.tsx">
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Pressable, ScrollView, Text, View } from 'react-native';
+import {
+  runOnJS,
+  useAnimatedReaction,
+  useSharedValue,
+} from 'react-native-reanimated';
+
+import { MONO_FONT } from './oscilloscope/constants';
+import { HudMetricTile } from './oscilloscope/HudMetricTile';
+import { styles } from './oscilloscope/styles';
+
+export type EcuConnectPhase = 'idle' | 'scanning' | 'connected';
+
+type HudStrings = {
+  rpm: string;
+  coolant: string;
+  intake: string;
+  tps: string;
+  batt: string;
+  speed: string;
+};
+
+export default function EcuDashboard() {
+  const mono = (MONO_FONT as string) ?? 'monospace';
+
+  const rpmSv = useSharedValue(1200);
+  const coolantSv = useSharedValue(85);
+  const intakeSv = useSharedValue(32);
+  const tpsSv = useSharedValue(5.5);
+  const battSv = useSharedValue(12.4);
+  const speedSv = useSharedValue(45);
+
+  const [disp, setDisp] = useState<HudStrings>({
+    rpm: '1200',
+    coolant: '85',
+    intake: '32',
+    tps: '5.5',
+    batt: '12.4',
+    speed: '45',
+  });
+
+  const flushHudFromSv = useCallback(
+    (r: number, c: number, i: number, t: number, b: number, s: number) => {
+      setDisp({
+        rpm: String(Math.round(r)),
+        coolant: String(Math.round(c)),
+        intake: String(Math.round(i)),
+        tps: t.toFixed(1),
+        batt: b.toFixed(1),
+        speed: String(Math.round(s)),
+      });
+    },
+    []
+  );
+
+  useAnimatedReaction(
+    () =>
+      `${rpmSv.value}|${coolantSv.value}|${intakeSv.value}|${tpsSv.value}|${battSv.value}|${speedSv.value}`,
+    (sig, prev) => {
+      if (sig === prev) {
+        return;
+      }
+      const p = sig.split('|');
+      const r = Number(p[0]);
+      const c = Number(p[1]);
+      const i = Number(p[2]);
+      const t = Number(p[3]);
+      const b = Number(p[4]);
+      const s = Number(p[5]);
+      runOnJS(flushHudFromSv)(r, c, i, t, b, s);
+    },
+    [flushHudFromSv]
+  );
+
+  useEffect(() => {
+    flushHudFromSv(
+      rpmSv.value,
+      coolantSv.value,
+      intakeSv.value,
+      tpsSv.value,
+      battSv.value,
+      speedSv.value
+    );
+  }, [rpmSv, coolantSv, intakeSv, tpsSv, battSv, speedSv, flushHudFromSv]);
+
+  const [phase, setPhase] = useState<EcuConnectPhase>('idle');
+  const scanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (scanTimerRef.current) {
+        clearTimeout(scanTimerRef.current);
+      }
+    };
+  }, []);
+
+  const connCopy = useMemo(() => {
+    switch (phase) {
+      case 'scanning':
+        return {
+          name: 'Scanning for Vgate…',
+          mac: '—',
+          latency: '—',
+          btnLabel: 'SCANNING…',
+        };
+      case 'connected':
+        return {
+          name: 'Vgate iCar 2s',
+          mac: 'AA:BB:CC:DD:EE:FF',
+          latency: '42',
+          btnLabel: 'DISCONNECT',
+        };
+      default:
+        return {
+          name: 'Not connected',
+          mac: '—',
+          latency: '—',
+          btnLabel: 'OBD CONNECT',
+        };
+    }
+  }, [phase]);
+
+  const onObdPress = () => {
+    if (phase === 'idle') {
+      setPhase('scanning');
+      if (scanTimerRef.current) {
+        clearTimeout(scanTimerRef.current);
+      }
+      scanTimerRef.current = setTimeout(() => {
+        setPhase('connected');
+        scanTimerRef.current = null;
+      }, 2600);
+      return;
+    }
+    if (phase === 'scanning') {
+      if (scanTimerRef.current) {
+        clearTimeout(scanTimerRef.current);
+        scanTimerRef.current = null;
+      }
+      setPhase('idle');
+      return;
+    }
+    setPhase('idle');
+  };
+
+  return (
+    <ScrollView
+      style={styles.bottomPanel}
+      contentContainerStyle={{ paddingBottom: 28 }}
+      keyboardShouldPersistTaps="handled"
+    >
+      <View style={styles.hudTopBar}>
+        <View style={styles.logoCluster}>
+          <Text style={[styles.logo, { fontFamily: mono }]}>LAUDA Lab</Text>
+          <Text style={[styles.ecuScreenTitle, { fontFamily: mono }]}>ECU TELEMETRY</Text>
+        </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={
+            phase === 'connected'
+              ? 'Disconnect OBD adapter'
+              : phase === 'scanning'
+                ? 'Cancel Bluetooth scan'
+                : 'Scan and connect OBD adapter'
+          }
+          onPress={onObdPress}
+          style={({ pressed }) => [
+            styles.ecuConnectBtn,
+            phase === 'scanning' && styles.ecuConnectBtnScanning,
+            phase === 'connected' && styles.ecuConnectBtnConnected,
+            pressed && styles.calBtnPressed,
+          ]}
+        >
+          <View pointerEvents="none" style={styles.ecuConnectGlow} />
+          <Text
+            style={[
+              styles.ecuConnectLabel,
+              { fontFamily: mono },
+              phase === 'scanning' && styles.ecuConnectLabelScanning,
+              phase === 'connected' && styles.ecuConnectLabelConnected,
+            ]}
+          >
+            {connCopy.btnLabel}
+          </Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.hudSection}>
+        <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Connection</Text>
+        <View style={styles.performanceCard}>
+          <View style={styles.ecuInfoRow}>
+            <Text style={[styles.ecuInfoKey, { fontFamily: mono }]}>Device</Text>
+            <Text style={[styles.ecuInfoVal, { fontFamily: mono }]} numberOfLines={1}>
+              {connCopy.name}
+            </Text>
+          </View>
+          <View style={styles.ecuInfoRow}>
+            <Text style={[styles.ecuInfoKey, { fontFamily: mono }]}>MAC</Text>
+            <Text style={[styles.ecuInfoVal, { fontFamily: mono }]}>{connCopy.mac}</Text>
+          </View>
+          <View style={styles.ecuInfoRow}>
+            <Text style={[styles.ecuInfoKey, { fontFamily: mono }]}>Latency</Text>
+            <Text style={[styles.ecuInfoVal, { fontFamily: mono }]}>
+              {connCopy.latency === '—' ? '—' : `${connCopy.latency} ms`}
+            </Text>
+          </View>
+        </View>
+      </View>
+
+      <View style={[styles.hudSection, { marginTop: 4 }]}>
+        <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Live ECU</Text>
+        <View style={styles.hudMetricRow}>
+          <HudMetricTile label="RPM" value={disp.rpm} suffix="rpm" mono={mono} />
+          <HudMetricTile label="Coolant" value={disp.coolant} suffix="°C" mono={mono} />
+          <HudMetricTile label="Intake" value={disp.intake} suffix="°C" mono={mono} />
+        </View>
+        <View style={[styles.hudMetricRow, { marginTop: 10 }]}>
+          <HudMetricTile label="TPS" value={disp.tps} suffix="%" mono={mono} />
+          <HudMetricTile label="Batt" value={disp.batt} suffix="V" mono={mono} />
+          <HudMetricTile label="ECU speed" value={disp.speed} suffix="km/h" mono={mono} />
+        </View>
+      </View>
+
+      <Text style={[styles.performanceHint, { fontFamily: mono, marginTop: 10 }]}>
+        ELM327 over BLE (Vgate iCar 2s). Rebuild dev client after adding the BLE config plugin.
+      </Text>
+    </ScrollView>
+  );
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/AxisBumpAdviceCard.tsx">
+import React from 'react';
+import { Text, View } from 'react-native';
+
+import type { SuspensionBumpDiagResult } from '../useSuspensionBumpFsm';
+import { surfaceStatusLabel, suspensionChipPresentation } from './bumpDiagPresentation';
+import { styles } from './styles';
+
+type AxisBumpAdviceCardProps = {
+  axisTitle: string;
+  diag: SuspensionBumpDiagResult | null;
+  mono: string;
+  showPitchBadge: boolean;
+  rearWaitingPlaceholder: string | null;
+};
+
+/** Single-axis bump diagnostics (Fork or Shock). */
+export function AxisBumpAdviceCard({
+  axisTitle,
+  diag,
+  mono,
+  showPitchBadge,
+  rearWaitingPlaceholder,
+}: AxisBumpAdviceCardProps) {
+  const showWaiting = rearWaitingPlaceholder != null && diag === null;
+
+  if (diag === null) {
+    return (
+      <View style={[styles.bumpDiagCard, styles.bumpAxisCardHalf]}>
+        <Text style={[styles.axisBumpCardTitle, { fontFamily: mono }]}>{axisTitle}</Text>
+        <Text style={[styles.bumpDiagPlaceholder, { fontFamily: mono }]}>
+          {showWaiting
+            ? rearWaitingPlaceholder
+            : 'Hit a bump after CAL · advice lands when settling holds.'}
+        </Text>
+      </View>
+    );
+  }
+
+  const ss = suspensionChipPresentation(diag.surfaceStatus);
+  return (
+    <View style={[styles.bumpDiagCard, styles.bumpAxisCardHalf]}>
+      <Text style={[styles.axisBumpCardTitle, { fontFamily: mono }]}>{axisTitle}</Text>
+
+      {showPitchBadge ? (
+        <View style={styles.pitchBiasBadge}>
+          <Text style={[styles.pitchBiasBadgeText, { fontFamily: mono }]}>{diag.pitchBiasNote}</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.bumpDiagHeadRow}>
+        <View style={[styles.bumpStatusChip, { borderColor: ss.chipBorder, backgroundColor: ss.chipBg }]}>
+          <Text style={[styles.bumpStatusChipTxt, { fontFamily: mono, color: ss.chipText }]}>
+            {surfaceStatusLabel(diag.surfaceStatus)}
+          </Text>
+        </View>
+        <Text style={[styles.bumpPeakInline, { fontFamily: mono }]}>
+          Peak {diag.maxPeakZG.toFixed(2)}{' '}
+          <Text style={[styles.metricTileSuf, { fontFamily: mono }]}>g</Text>
+        </Text>
+      </View>
+
+      <Text style={[styles.bumpAdviceLine, { fontFamily: mono }]}>
+        <Text style={styles.bumpAdviceLbl}>Compression · </Text>
+        {diag.compressionAdvice}
+      </Text>
+      <Text style={[styles.bumpAdviceLine, { fontFamily: mono }]}>
+        <Text style={styles.bumpAdviceLbl}>Rebound · </Text>
+        {diag.reboundAdvice}
+      </Text>
+
+      <Text style={[styles.bumpDiagMeta, { fontFamily: mono }]}>
+        Bounces {diag.bounceCount} · Settling {diag.settlingDurationMs.toFixed(0)} ms
+      </Text>
+    </View>
+  );
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/bumpDiagPresentation.ts">
+import type { SuspensionSurfaceStatus } from '../useSuspensionBumpFsm';
+
+export function suspensionChipPresentation(surfaceStatus: SuspensionSurfaceStatus): {
+  chipBg: string;
+  chipBorder: string;
+  chipText: string;
+} {
+  switch (surfaceStatus) {
+    case 'HARSH_IMPACT':
+      return { chipBg: '#18080c', chipBorder: '#ff4d6d', chipText: '#ff8a9e' };
+    case 'UNDERDAMPED':
+      return { chipBg: '#181004', chipBorder: '#e8a035', chipText: '#ffd18a' };
+    case 'OVERDAMPED':
+      return { chipBg: '#060e18', chipBorder: '#4a8cff', chipText: '#9ec5ff' };
+    case 'GOOD':
+    default:
+      return { chipBg: '#06180e', chipBorder: '#2cff8a', chipText: '#8cffc4' };
+  }
+}
+
+export function surfaceStatusLabel(surfaceStatus: SuspensionSurfaceStatus): string {
+  switch (surfaceStatus) {
+    case 'HARSH_IMPACT':
+      return 'HARSH IMPACT';
+    case 'UNDERDAMPED':
+      return 'UNDERDAMPED';
+    case 'OVERDAMPED':
+      return 'OVERDAMPED';
+    case 'GOOD':
+    default:
+      return 'GOOD';
+  }
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/HudMetricTile.tsx">
+import React from 'react';
+import { Text, View } from 'react-native';
+
+import { styles } from './styles';
+
+export function HudMetricTile({
+  label,
+  value,
+  suffix,
+  alert,
+  muted,
+  mono,
+}: {
+  label: string;
+  value: string;
+  suffix: string;
+  alert?: boolean;
+  muted?: boolean;
+  mono: string;
+}) {
+  const valColor = alert ? '#ff6b82' : muted ? '#87b89a' : '#c4f5dc';
+  return (
+    <View style={styles.metricTile}>
+      <Text style={[styles.metricTileLabel, { fontFamily: mono }]} numberOfLines={2}>
+        {label}
+      </Text>
+      <Text style={[styles.metricTileVal, { fontFamily: mono, color: valColor }]}>
+        {value}
+        {suffix ? (
+          <Text style={[styles.metricTileSuf, { fontFamily: mono }]}> {suffix}</Text>
+        ) : null}
+      </Text>
+    </View>
+  );
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/OscilloscopeSettingsDrawer.tsx">
+import Ionicons from '@expo/vector-icons/Ionicons';
+import React, { useEffect, useState, type Dispatch, type SetStateAction } from 'react';
+import { Modal, Pressable, Text, useWindowDimensions, View } from 'react-native';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import Animated, {
+  cancelAnimation,
+  Extrapolation,
+  interpolate,
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from 'react-native-reanimated';
+import {
+  initialWindowMetrics,
+  SafeAreaProvider,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
+
+import { DspTuningSliders } from '../DspTuningSliders';
+import type { TelemetryPresetMode } from '../telemetryPresets';
+import type { OscilloscopeSharedValues } from './hooks/useOscilloscopeSharedValues';
+import { styles } from './styles';
+
+const DRAWER_WIDTH_FRAC = 0.715;
+const DRAWER_WIDTH_MAX_DP = 404;
+
+/**
+ * Drawer motion runs on the UI thread (Reanimated springs + interpolation worklets), not JS rAF pacing,
+ * so it stays smooth on high refresh displays (90-120 Hz ProMotion).
+ */
+const SPRING_OPEN = { stiffness: 340, damping: 34, mass: 0.88 } as const;
+const SPRING_CLOSE = { stiffness: 380, damping: 36, mass: 0.9 } as const;
+
+const BACKDROP_OPACITY = 0.54;
+
+export type OscilloscopeSettingsDrawerProps = {
+  visible: boolean;
+  onClose: () => void;
+  mono: string;
+  sv: OscilloscopeSharedValues;
+  dspPresetSyncNonce: number;
+  setTelemetryPresetMode: Dispatch<SetStateAction<TelemetryPresetMode>>;
+};
+
+type OscilloscopeSettingsDrawerInteriorProps = OscilloscopeSettingsDrawerProps & {
+  mounted: boolean;
+  setMounted: React.Dispatch<React.SetStateAction<boolean>>;
+};
+
+function OscilloscopeSettingsDrawerInterior({
+  visible,
+  onClose,
+  mono,
+  sv,
+  dspPresetSyncNonce,
+  setTelemetryPresetMode,
+  mounted,
+  setMounted,
+}: OscilloscopeSettingsDrawerInteriorProps) {
+  const insets = useSafeAreaInsets();
+  const { width: winW } = useWindowDimensions();
+  const drawerWidth = Math.min(DRAWER_WIDTH_MAX_DP, Math.round(winW * DRAWER_WIDTH_FRAC));
+  const drawerWidthSv = useSharedValue(drawerWidth);
+  const translateX = useSharedValue(-drawerWidth);
+  const panStartX = useSharedValue(0);
+
+  useEffect(() => {
+    drawerWidthSv.value = drawerWidth;
+  }, [drawerWidth, drawerWidthSv]);
+
+  useEffect(() => {
+    if (!mounted) return;
+    cancelAnimation(translateX);
+    if (visible) {
+      translateX.value = -drawerWidthSv.value;
+      translateX.value = withSpring(0, SPRING_OPEN);
+    } else {
+      translateX.value = withSpring(-drawerWidthSv.value, SPRING_CLOSE, (finished) => {
+        if (finished) runOnJS(setMounted)(false);
+      });
+    }
+  }, [visible, mounted, translateX, drawerWidthSv, setMounted]);
+
+  const backdropStyle = useAnimatedStyle(() => {
+    'worklet';
+    const w = drawerWidthSv.value;
+    return {
+      opacity: interpolate(
+        translateX.value,
+        [-w, 0],
+        [0, BACKDROP_OPACITY],
+        Extrapolation.CLAMP
+      ),
+    };
+  });
+
+  const panelStyle = useAnimatedStyle(() => {
+    'worklet';
+    return {
+      transform: [{ translateX: translateX.value }],
+    };
+  });
+
+  const panDismiss = Gesture.Pan()
+    /** Prefer horizontal intent: activating only after dragging left clears vertical scroll jitter. */
+    .activeOffsetX(-14)
+    .failOffsetY([-28, 28])
+    .onBegin(() => {
+      cancelAnimation(translateX);
+      panStartX.value = translateX.value;
+    })
+    .onUpdate((e) => {
+      'worklet';
+      const w = drawerWidthSv.value;
+      const raw = panStartX.value + e.translationX;
+      translateX.value = Math.min(0, Math.max(-w, raw));
+    })
+    .onEnd((e) => {
+      'worklet';
+      const w = drawerWidthSv.value;
+      const thresh = -w * 0.28;
+      const shouldClose = translateX.value < thresh || e.velocityX < -720;
+      if (shouldClose) {
+        runOnJS(onClose)();
+      } else {
+        translateX.value = withSpring(0, SPRING_OPEN);
+      }
+    });
+
+  const {
+    vertFastAlphaSv,
+    sensitivityMultiplierSv,
+    bumpThresholdGsv,
+    stableZoneGsv,
+    stableHoldMssv,
+    harshPeakGsv,
+    overdampedSettlingMssv,
+    zeroCrossEpsGsv,
+  } = sv;
+
+  const panelInset = {
+    top: insets.top,
+    bottom: insets.bottom,
+    left: insets.left,
+  };
+
+  return (
+    <GestureHandlerRootView style={styles.settingsDrawerRoot}>
+      <View style={{ flex: 1 }} accessibilityViewIsModal>
+        <Animated.View
+          accessibilityElementsHidden={!visible}
+          importantForAccessibility={visible ? 'yes' : 'no-hide-descendants'}
+          pointerEvents={visible ? 'auto' : 'none'}
+          style={[styles.settingsDrawerBackdrop, backdropStyle]}
+        >
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss filter settings"
+            style={styles.settingsDrawerBackdropPress}
+            disabled={!visible}
+            onPress={onClose}
+          />
+        </Animated.View>
+
+        <GestureDetector gesture={panDismiss}>
+          <Animated.View
+            pointerEvents="box-none"
+            style={[
+              styles.settingsDrawerPanelWrap,
+              {
+                width: drawerWidth,
+                top: panelInset.top,
+                bottom: panelInset.bottom,
+                left: panelInset.left,
+              },
+              panelStyle,
+            ]}
+          >
+            <View style={styles.settingsDrawerPanel}>
+              <View pointerEvents="none" style={styles.settingsDrawerEdgeLine} />
+              <View style={[styles.settingsDrawerHeader, { paddingTop: 10 }]}>
+                <View style={styles.settingsDrawerTitleBlock}>
+                  <Text style={[styles.settingsDrawerTitle, { fontFamily: mono }]}>DSP · FSM</Text>
+                  <Text style={[styles.settingsDrawerSubtitle, { fontFamily: mono }]}>
+                    Live tuning · 1200cc @ ~45 km/h baseline
+                  </Text>
+                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Close filter settings"
+                  onPress={onClose}
+                  style={({ pressed }) => [
+                    styles.settingsDrawerCloseBtn,
+                    pressed && styles.settingsDrawerCloseBtnPressed,
+                  ]}
+                >
+                  <Ionicons name="close" size={22} color="#8a9e94" />
+                </Pressable>
+              </View>
+              <View style={[styles.settingsDrawerBody, { paddingBottom: 14 }]}>
+                <DspTuningSliders
+                  presentation="sheet"
+                  mono={mono}
+                  visible={visible}
+                  vertFastAlphaSv={vertFastAlphaSv}
+                  sensitivityMultiplierSv={sensitivityMultiplierSv}
+                  bumpThresholdG={bumpThresholdGsv}
+                  stableZoneG={stableZoneGsv}
+                  stableHoldMs={stableHoldMssv}
+                  harshPeakG={harshPeakGsv}
+                  overdampedSettlingMs={overdampedSettlingMssv}
+                  zeroCrossEpsG={zeroCrossEpsGsv}
+                  onUserTune={() => setTelemetryPresetMode('custom')}
+                  externalSyncNonce={dspPresetSyncNonce}
+                />
+              </View>
+            </View>
+          </Animated.View>
+        </GestureDetector>
+      </View>
+    </GestureHandlerRootView>
+  );
+}
+
+export function OscilloscopeSettingsDrawer(props: OscilloscopeSettingsDrawerProps) {
+  const { visible, onClose } = props;
+  const [mounted, setMounted] = useState(visible);
+
+  useEffect(() => {
+    if (visible) {
+      setMounted(true);
+    }
+  }, [visible]);
+
+  return (
+    <Modal transparent visible={mounted} animationType="none" onRequestClose={onClose} statusBarTranslucent>
+      <SafeAreaProvider initialMetrics={initialWindowMetrics ?? undefined}>
+        <OscilloscopeSettingsDrawerInterior {...props} mounted={mounted} setMounted={setMounted} />
+      </SafeAreaProvider>
+    </Modal>
+  );
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/sensorMath.ts">
+import { RAD_TO_DEG, STATIONARY_DEADZONE_Z_G } from './constants';
+
+/** Snap pitch/roll HUD to 0.5° steps so the readout does not flicker on engine vibration. */
+export function hudTiltDisplayDeg(deg: number): number {
+  'worklet';
+  return Math.round(deg * 2) / 2;
+}
+
+/**
+ * Absolute tilt (deg): Pitch = atan2(ay, az), Roll = atan2(-ax, √(ay²+az²)) — accelerometer only.
+ */
+export function accelPitchRollDegAbsolute(ax: number, ay: number, az: number): {
+  pitchDeg: number;
+  rollDeg: number;
+} {
+  'worklet';
+  const yz = ay * ay + az * az;
+  const denom = yz > 0 ? Math.sqrt(yz) : 0;
+  const pitchDeg = Math.atan2(ay, az) * RAD_TO_DEG;
+  const rollDeg = Math.atan2(-ax, denom) * RAD_TO_DEG;
+  return { pitchDeg, rollDeg };
+}
+
+/** Clamp displayed vertical linear Z (OSC + HUD + bump FSM). */
+export function displayWorldZG(zAfterProcessG: number) {
+  'worklet';
+  const z = zAfterProcessG;
+  return Math.abs(z) < STATIONARY_DEADZONE_Z_G ? 0 : z;
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/types.ts">
+/** HUD snapshot synced from UI-thread peaks (slow path). */
+export type HudSnap = {
+  pitch: number;
+  roll: number;
+  peak: number;
+  speed: number;
+  /** Deadzone'd vertical linear G (same as chart). */
+  zG: number;
+  peakRollLeft: number;
+  peakRollRight: number;
+  peakVertZ: number;
+};
+</file>
+
+<file path="components/telemetry/useForegroundGpsStream.ts">
+import * as Location from 'expo-location';
+import { useEffect, useRef } from 'react';
+import type { SharedValue } from 'react-native-reanimated';
+
+export type ForegroundGpsSample = {
+  speedMs: number;
+  latitude: number;
+  longitude: number;
+  altitude: number | null;
+  timestampMs: number;
+};
+
+export type UseForegroundGpsStreamOpts = {
+  speedKmH: SharedValue<number>;
+  onSample?: (sample: ForegroundGpsSample) => void;
+};
+
+/**
+ * Foreground GPS watch: updates `speedKmH` every fix and optionally notifies for track logging.
+ */
+export function useForegroundGpsStream({ speedKmH, onSample }: UseForegroundGpsStreamOpts): void {
+  const onSampleRef = useRef(onSample);
+  onSampleRef.current = onSample;
+
+  useEffect(() => {
+    let sub: Location.LocationSubscription | undefined;
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        speedKmH.value = 0;
+        return;
+      }
+      try {
+        sub = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.BestForNavigation,
+            timeInterval: 100,
+            distanceInterval: 0,
+          },
+          (loc) => {
+            const speedMs = loc.coords.speed;
+            const s = Math.max(speedMs ?? 0, 0);
+            speedKmH.value = s * 3.6;
+
+            const lat = loc.coords.latitude;
+            const lon = loc.coords.longitude;
+            const tsMs =
+              loc.timestamp != null && loc.timestamp > 0 ? loc.timestamp : Date.now();
+
+            const sample: ForegroundGpsSample = {
+              speedMs: s,
+              latitude: lat,
+              longitude: lon,
+              altitude:
+                loc.coords.altitude != null && Number.isFinite(loc.coords.altitude)
+                  ? loc.coords.altitude
+                  : null,
+              timestampMs: tsMs,
+            };
+            onSampleRef.current?.(sample);
+          }
+        );
+      } catch {
+        speedKmH.value = 0;
+      }
+    })();
+    return () => {
+      void sub?.remove();
+    };
+  }, [speedKmH]);
+}
+</file>
+
+<file path="components/telemetry/usePerformanceAnalyzer.ts">
+import { useCallback, useMemo, useState } from 'react';
+import {
+  runOnJS,
+  type FrameInfo,
+  useFrameCallback,
+  useSharedValue,
+  type SharedValue,
+} from 'react-native-reanimated';
+
+/** Ready for next run segment. */
+export const PERF_IDLE = 0;
+
+/** Measuring 0 → 60 km/h (squat → launch). */
+export const PERF_ACCELERATING = 1;
+
+/** Measuring hard stop distance (from ~high speed dive). */
+export const PERF_BRAKING = 2;
+
+export type PerformanceResult = {
+  type: 'ACCEL' | 'BRAKE';
+  /** Elapsed interval for segment (accel to 60, or braking until near stop). */
+  timeSeconds: number;
+  /** Integrated path length over the measured segment (meters). */
+  distanceMeters: number;
+  /** Accel: max positive pitch (squat). Brake: algebraically smallest pitch reached (dive dominates). */
+  maxPitchDeg: number;
+};
+
+const ACCEL_ABORT_LOW_KMH = 8;
+const ACCEL_ABORT_PEAK_GAP_KMH = 14;
+const BRAKE_ENTRY_MIN_KMH = 40;
+const BRAKE_RAPID_DROP_KMH = 6;
+const BRAKE_DIVE_MIN_DEG = -2;
+
+type UsePerformanceAnalyzerArgs = {
+  speedKmH: SharedValue<number>;
+  pitchDeg: SharedValue<number>;
+  hasCalibSv: SharedValue<number>;
+};
+
+export function usePerformanceAnalyzer({
+  speedKmH,
+  pitchDeg,
+  hasCalibSv,
+}: UsePerformanceAnalyzerArgs): {
+  latestResult: PerformanceResult | null;
+  perfStateSv: SharedValue<number>;
+  clearLatest: () => void;
+} {
+  const [latestResult, setLatestResult] = useState<PerformanceResult | null>(null);
+
+  const pushResult = useCallback((r: PerformanceResult) => {
+    setLatestResult(r);
+  }, []);
+
+  const clearLatest = useCallback(() => {
+    setLatestResult(null);
+  }, []);
+
+  const perfState = useSharedValue(PERF_IDLE);
+  const perfStartTimeMs = useSharedValue(0);
+  const maxPitchTracked = useSharedValue(0);
+  const distM = useSharedValue(0);
+  const prevSpeed = useSharedValue(0);
+  const peakDuringAccel = useSharedValue(0);
+
+  const perfFrame = useMemo(() => {
+    return (frame: FrameInfo) => {
+      'worklet';
+      const dtRaw = frame.timeSincePreviousFrame;
+      const dtMs = dtRaw != null && dtRaw > 0 && dtRaw < 200 ? dtRaw : 1000 / 60;
+      const now = Date.now();
+      const v = speedKmH.value;
+      const pitch = pitchDeg.value;
+      const prevV = prevSpeed.value;
+
+      if (hasCalibSv.value !== 1) {
+        if (perfState.value !== PERF_IDLE) {
+          perfState.value = PERF_IDLE;
+        }
+        prevSpeed.value = v;
+        return;
+      }
+
+      if (perfState.value === PERF_IDLE) {
+        if (v < 2 && pitch > 1.5) {
+          perfState.value = PERF_ACCELERATING;
+          perfStartTimeMs.value = now;
+          maxPitchTracked.value = pitch;
+          distM.value = 0;
+          peakDuringAccel.value = v;
+        } else if (
+          v > BRAKE_ENTRY_MIN_KMH &&
+          prevV > BRAKE_ENTRY_MIN_KMH &&
+          prevV - v > BRAKE_RAPID_DROP_KMH &&
+          pitch < BRAKE_DIVE_MIN_DEG
+        ) {
+          perfState.value = PERF_BRAKING;
+          perfStartTimeMs.value = now;
+          maxPitchTracked.value = pitch;
+          distM.value = 0;
+        }
+        prevSpeed.value = v;
+        return;
+      }
+
+      if (perfState.value === PERF_ACCELERATING) {
+        if (pitch > maxPitchTracked.value) {
+          maxPitchTracked.value = pitch;
+        }
+        if (v > peakDuringAccel.value) {
+          peakDuringAccel.value = v;
+        }
+        distM.value += (v / 3.6) * (dtMs / 1000);
+
+        if (v >= 60) {
+          const tSec = (now - perfStartTimeMs.value) / 1000;
+          runOnJS(pushResult)({
+            type: 'ACCEL',
+            timeSeconds: tSec,
+            distanceMeters: distM.value,
+            maxPitchDeg: maxPitchTracked.value,
+          });
+          perfState.value = PERF_IDLE;
+          prevSpeed.value = v;
+          return;
+        }
+
+        const elapsed = now - perfStartTimeMs.value;
+        if (elapsed > 600 && v < ACCEL_ABORT_LOW_KMH) {
+          perfState.value = PERF_IDLE;
+          prevSpeed.value = v;
+          return;
+        }
+        if (peakDuringAccel.value > 25 && v < peakDuringAccel.value - ACCEL_ABORT_PEAK_GAP_KMH) {
+          perfState.value = PERF_IDLE;
+          prevSpeed.value = v;
+          return;
+        }
+
+        prevSpeed.value = v;
+        return;
+      }
+
+      if (perfState.value === PERF_BRAKING) {
+        if (pitch < maxPitchTracked.value) {
+          maxPitchTracked.value = pitch;
+        }
+        distM.value += (v / 3.6) * (dtMs / 1000);
+
+        if (v < 3) {
+          const tSec = (now - perfStartTimeMs.value) / 1000;
+          runOnJS(pushResult)({
+            type: 'BRAKE',
+            timeSeconds: tSec,
+            distanceMeters: distM.value,
+            maxPitchDeg: maxPitchTracked.value,
+          });
+          perfState.value = PERF_IDLE;
+          prevSpeed.value = v;
+          return;
+        }
+
+        const brakingElapsed = now - perfStartTimeMs.value;
+        if (brakingElapsed > 520 && pitch > -0.55 && v > 18 && v >= prevV - 1.2) {
+          perfState.value = PERF_IDLE;
+          prevSpeed.value = v;
+          return;
+        }
+
+        prevSpeed.value = v;
+        return;
+      }
+
+      prevSpeed.value = v;
+    };
+    // Stable SharedValue refs captured in worklet; avoid listing .value accessors in deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pushResult]);
+
+  useFrameCallback(perfFrame);
+
+  return { latestResult, perfStateSv: perfState, clearLatest };
+}
+</file>
+
+<file path="components/ui/icon-symbol.ios.tsx">
+import { SymbolView, SymbolViewProps, SymbolWeight } from 'expo-symbols';
+import { StyleProp, ViewStyle } from 'react-native';
+
+export function IconSymbol({
+  name,
+  size = 24,
+  color,
+  style,
+  weight = 'regular',
+}: {
+  name: SymbolViewProps['name'];
+  size?: number;
+  color: string;
+  style?: StyleProp<ViewStyle>;
+  weight?: SymbolWeight;
+}) {
+  return (
+    <SymbolView
+      weight={weight}
+      tintColor={color}
+      resizeMode="scaleAspectFit"
+      name={name}
+      style={[
+        {
+          width: size,
+          height: size,
+        },
+        style,
+      ]}
+    />
+  );
+}
+</file>
+
+<file path="components/app-error-boundary.tsx">
+import React, { Component, type ErrorInfo, type ReactNode } from 'react';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
+
+type Props = {
+  children: ReactNode;
+};
+
+type State = {
+  hasError: boolean;
+  error: Error | null;
+};
+
+function toError(e: unknown): Error {
+  if (e instanceof Error) return e;
+  if (typeof e === 'string') return new Error(e);
+  try {
+    return new Error(JSON.stringify(e));
+  } catch {
+    return new Error(String(e));
+  }
+}
+
+/**
+ * Catches React render/lifecycle errors in descendants. Logs to Metro / Logcat via console.
+ * Does not catch: event handlers, async rejections, native crashes, Android ANRs, UI-thread/Reanimated
+ * worklet faults that never surface as JS exceptions, or Skia/native faults — those look like hangs
+ * with nothing logged here.
+ */
+export class AppErrorBoundary extends Component<Props, State> {
+  state: State = { hasError: false, error: null };
+
+  static getDerivedStateFromError(error: unknown): State {
+    return { hasError: true, error: toError(error) };
+  }
+
+  componentDidCatch(error: unknown, info: ErrorInfo): void {
+    const err = toError(error);
+    console.error('[AppErrorBoundary] error name:', err?.name);
+    console.error('[AppErrorBoundary] error message:', err?.message);
+    console.error('[AppErrorBoundary] error:', err);
+    console.error('[AppErrorBoundary] stack:', err?.stack);
+    console.error('[AppErrorBoundary] componentStack:', info?.componentStack);
+  }
+
+  render(): ReactNode {
+    if (this.state.hasError && this.state.error) {
+      const { message, stack } = this.state.error;
+      return (
+        <View style={styles.screen} testID="app-error-boundary">
+          <Text style={styles.title}>Render error (check Metro / Logcat)</Text>
+          <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
+            <Text style={styles.message}>{message}</Text>
+            {stack ? <Text style={styles.stack}>{stack}</Text> : null}
+          </ScrollView>
+        </View>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+const styles = StyleSheet.create({
+  screen: {
+    flex: 1,
+    backgroundColor: '#0f0f12',
+    paddingTop: 48,
+    paddingHorizontal: 16,
+  },
+  title: {
+    color: '#F97316',
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  scroll: { flex: 1 },
+  scrollContent: { paddingBottom: 32 },
+  message: {
+    color: '#F8FAFC',
+    fontSize: 14,
+    marginBottom: 16,
+  },
+  stack: {
+    color: '#94A3B8',
+    fontSize: 11,
+    fontFamily: 'monospace',
+  },
+});
+</file>
+
+<file path="components/haptic-tab.tsx">
+import { BottomTabBarButtonProps } from '@react-navigation/bottom-tabs';
+import { PlatformPressable } from '@react-navigation/elements';
+import * as Haptics from 'expo-haptics';
+
+export function HapticTab(props: BottomTabBarButtonProps) {
+  return (
+    <PlatformPressable
+      {...props}
+      onPressIn={(ev) => {
+        if (process.env.EXPO_OS === 'ios') {
+          // Add a soft haptic feedback when pressing down on the tabs.
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        }
+        props.onPressIn?.(ev);
+      }}
+    />
+  );
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/constants.ts">
+import { Platform } from 'react-native';
+
+export const BUFFER_LEN = 360;
+
+/** HUD pitch/roll EMA — accel-only tilt; higher = snappier (then quantized for display). */
+export const HUD_ANGLE_EMA = 0.12;
+
+export const RAD_TO_DEG = 180 / Math.PI;
+
+/**
+ * Stationary deadzone (g): |Vert Z| below this → display 0.00 (chart + leak prevention).
+ */
+export const STATIONARY_DEADZONE_Z_G = 0.04;
+
+/** Speed below this (km/h) displays as zero. */
+export const SPEED_DISPLAY_ZERO_BELOW_KMH = 5;
+
+/** Peak-G hysteresis — ignore buzz below this magnitude on MA_Z (motorcycle vibration). */
+export const PEAK_THRESHOLD_G = 0.15;
+
+/** Moving-average length for Peak-G (40ms @ ~100Hz-ish sampling ≈ 4 samples). */
+export const PEAK_MA_SAMPLES = 4;
+
+/** Gravity / tilt precision calibration window (moving average over raw accel samples). */
+export const PRECISION_CALIBRATION_MS = 3000;
+
+export const MONO_FONT = Platform.select({
+  ios: 'Menlo',
+  android: 'monospace',
+  default: 'monospace',
+});
+</file>
+
+<file path="components/telemetry/oscilloscope/dspConstants.ts">
+/** Target sensor cadence (ms). Android / Expo: 2 ≈ 500 Hz on capable devices. */
+export const SENSOR_INTERVAL_MS_TARGET = 2;
+
+/** Assumed sample rate (Hz) for rear trace delay spacing / chart time mapping vs buffer index. */
+export const DSP_ASSUMED_FS_HZ = 500;
+
+/** Motorcycle wheelbase for front→rear delay (m). */
+export const WHEELBASE_M = 1.57;
+
+/** Speed bump: +peak then −trough within this window (ms). */
+export const TERRAIN_PAIR_WINDOW_MS = 150;
+export const TERRAIN_SPEED_BUMP_POS_G = 0.3;
+export const TERRAIN_SPEED_BUMP_NEG_G = -0.2;
+export const TERRAIN_POTHOLE_NEG_G = -0.35;
+export const TERRAIN_POTHOLE_POS_G = 0.15;
+
+/** Terrain codes for SharedValue (worklet-safe numbers). */
+export const TERRAIN_FLAT = 0;
+export const TERRAIN_SPEED_BUMP = 1;
+export const TERRAIN_POTHOLE = 2;
+
+/** Öhlins-style rear trace gold. */
+export const REAR_TRACE_COLOR = '#ffb700';
+</file>
+
+<file path="components/telemetry/DspTuningSliders.tsx">
+import Slider from '@react-native-community/slider';
+import React, { useCallback, useEffect, useState } from 'react';
+import { ScrollView as RNScrollView, StyleSheet, Text, View } from 'react-native';
+import { ScrollView as GestureScrollView } from 'react-native-gesture-handler';
+import type { SharedValue } from 'react-native-reanimated';
+
+/** `panel`: fixed max height inside another scroll surface. `sheet`: flex fill (e.g. modal drawer). */
+export type DspTuningPresentation = 'panel' | 'sheet';
+
+export type DspTuningSlidersProps = {
+  mono: string;
+  visible: boolean;
+  presentation?: DspTuningPresentation;
+  vertFastAlphaSv: SharedValue<number>;
+  sensitivityMultiplierSv: SharedValue<number>;
+  bumpThresholdG: SharedValue<number>;
+  stableZoneG: SharedValue<number>;
+  stableHoldMs: SharedValue<number>;
+  harshPeakG: SharedValue<number>;
+  overdampedSettlingMs: SharedValue<number>;
+  zeroCrossEpsG: SharedValue<number>;
+  /** When sliders move, preset label can flip to Custom. */
+  onUserTune?: () => void;
+  /** Increment when SharedValues change from outside (e.g. telemetry preset) so sliders resync while open. */
+  externalSyncNonce?: number;
+};
+
+type TuneKey =
+  | 'vertFastAlpha'
+  | 'sensitivityMultiplier'
+  | 'bumpThresholdG'
+  | 'stableZoneG'
+  | 'stableHoldMs'
+  | 'harshPeakG'
+  | 'overdampedSettlingMs'
+  | 'zeroCrossEpsG';
+
+/** Live DSP / FSM tuning: sliders write SharedValues consumed by Worklets immediately. */
+export function DspTuningSliders({
+  mono,
+  visible,
+  presentation = 'panel',
+  vertFastAlphaSv,
+  sensitivityMultiplierSv,
+  bumpThresholdG,
+  stableZoneG,
+  stableHoldMs,
+  harshPeakG,
+  overdampedSettlingMs,
+  zeroCrossEpsG,
+  onUserTune,
+  externalSyncNonce = 0,
+}: DspTuningSlidersProps) {
+  const [vals, setVals] = useState<Record<TuneKey, number>>(() => ({
+    vertFastAlpha: vertFastAlphaSv.value,
+    sensitivityMultiplier: sensitivityMultiplierSv.value,
+    bumpThresholdG: bumpThresholdG.value,
+    stableZoneG: stableZoneG.value,
+    stableHoldMs: stableHoldMs.value,
+    harshPeakG: harshPeakG.value,
+    overdampedSettlingMs: overdampedSettlingMs.value,
+    zeroCrossEpsG: zeroCrossEpsG.value,
+  }));
+
+  const syncFromShared = useCallback(() => {
+    setVals({
+      vertFastAlpha: vertFastAlphaSv.value,
+      sensitivityMultiplier: sensitivityMultiplierSv.value,
+      bumpThresholdG: bumpThresholdG.value,
+      stableZoneG: stableZoneG.value,
+      stableHoldMs: stableHoldMs.value,
+      harshPeakG: harshPeakG.value,
+      overdampedSettlingMs: overdampedSettlingMs.value,
+      zeroCrossEpsG: zeroCrossEpsG.value,
+    });
+  }, [
+    bumpThresholdG,
+    harshPeakG,
+    overdampedSettlingMs,
+    sensitivityMultiplierSv,
+    stableHoldMs,
+    stableZoneG,
+    vertFastAlphaSv,
+    zeroCrossEpsG,
+  ]);
+
+  useEffect(() => {
+    if (visible) {
+      syncFromShared();
+    }
+  }, [visible, syncFromShared, externalSyncNonce]);
+
+  const setTune = useCallback(
+    (key: TuneKey, sv: SharedValue<number>, v: number) => {
+      sv.value = v;
+      setVals((p) => ({ ...p, [key]: v }));
+      onUserTune?.();
+    },
+    [onUserTune]
+  );
+
+  const ROWS: {
+    key: TuneKey;
+    label: string;
+    min: number;
+    max: number;
+    step: number;
+    sv: SharedValue<number>;
+    format: (n: number) => string;
+  }[] = [
+    {
+      key: 'vertFastAlpha',
+      label: 'VERT_FAST α (LPF)',
+      min: 0.01,
+      max: 0.2,
+      step: 0.005,
+      sv: vertFastAlphaSv,
+      format: (n) => n.toFixed(3),
+    },
+    {
+      key: 'sensitivityMultiplier',
+      label: 'Chart gain (×)',
+      min: 0.8,
+      max: 10,
+      step: 0.05,
+      sv: sensitivityMultiplierSv,
+      format: (n) => n.toFixed(2),
+    },
+    {
+      key: 'bumpThresholdG',
+      label: 'BUMP_THRESHOLD_G (g)',
+      min: 0.1,
+      max: 1.2,
+      step: 0.01,
+      sv: bumpThresholdG,
+      format: (n) => n.toFixed(2),
+    },
+    {
+      key: 'stableZoneG',
+      label: 'STABLE_ZONE_G (g)',
+      min: 0.05,
+      max: 0.35,
+      step: 0.01,
+      sv: stableZoneG,
+      format: (n) => n.toFixed(2),
+    },
+    {
+      key: 'stableHoldMs',
+      label: 'STABLE_HOLD_MS',
+      min: 50,
+      max: 800,
+      step: 5,
+      sv: stableHoldMs,
+      format: (n) => n.toFixed(0),
+    },
+    {
+      key: 'harshPeakG',
+      label: 'HARSH_PEAK_G',
+      min: 0.4,
+      max: 3,
+      step: 0.05,
+      sv: harshPeakG,
+      format: (n) => n.toFixed(2),
+    },
+    {
+      key: 'overdampedSettlingMs',
+      label: 'OVERDAMPED_SETTLING_MS',
+      min: 200,
+      max: 1500,
+      step: 10,
+      sv: overdampedSettlingMs,
+      format: (n) => n.toFixed(0),
+    },
+    {
+      key: 'zeroCrossEpsG',
+      label: 'ZERO_CROSS_EPS_G',
+      min: 0.015,
+      max: 0.2,
+      step: 0.005,
+      sv: zeroCrossEpsG,
+      format: (n) => n.toFixed(3),
+    },
+  ];
+
+  const isSheet = presentation === 'sheet';
+  const ScrollCmp = isSheet ? GestureScrollView : RNScrollView;
+
+  return (
+    <ScrollCmp
+      nestedScrollEnabled={!isSheet}
+      style={isSheet ? styles.scrollSheet : styles.scroll}
+      contentContainerStyle={isSheet ? styles.scrollContentSheet : styles.scrollContent}
+      keyboardShouldPersistTaps="handled"
+    >
+      {ROWS.map((row) => (
+        <View key={row.key} style={styles.row}>
+          <View style={styles.rowHeader}>
+            <Text style={[styles.rowLabel, { fontFamily: mono }]} numberOfLines={2}>
+              {row.label}
+            </Text>
+            <Text style={[styles.rowValue, { fontFamily: mono }]}>{row.format(vals[row.key])}</Text>
+          </View>
+          <Slider
+            style={styles.slider}
+            minimumValue={row.min}
+            maximumValue={row.max}
+            step={row.step}
+            value={vals[row.key]}
+            minimumTrackTintColor="#2cff8a"
+            maximumTrackTintColor="#2a3330"
+            thumbTintColor="#c4f5dc"
+            onValueChange={(v) => setTune(row.key, row.sv, v)}
+          />
+        </View>
+      ))}
+    </ScrollCmp>
+  );
+}
+
+const styles = StyleSheet.create({
+  scroll: {
+    maxHeight: 340,
+    width: '100%',
+  },
+  scrollSheet: {
+    flex: 1,
+    width: '100%',
+  },
+  scrollContent: {
+    paddingBottom: 8,
+    gap: 4,
+  },
+  scrollContentSheet: {
+    paddingBottom: 4,
+    gap: 4,
+    flexGrow: 1,
+  },
+  row: {
+    marginBottom: 10,
+  },
+  rowHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+    gap: 8,
+  },
+  rowLabel: {
+    flex: 1,
+    color: '#8a9e94',
+    fontSize: 10,
+    letterSpacing: 0.6,
+  },
+  rowValue: {
+    color: '#c4f5dc',
+    fontSize: 11,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+    minWidth: 56,
+    textAlign: 'right',
+  },
+  slider: {
+    width: '100%',
+    height: 36,
+  },
+});
+</file>
+
+<file path="components/telemetry/PerformanceAnalyzerView.tsx">
+import React, { useCallback, useMemo, useState, type SetStateAction } from 'react';
+import { Modal, Pressable, ScrollView, Text, useWindowDimensions, View } from 'react-native';
+import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
+
+import type { SuspensionBumpDiagResult } from './useSuspensionBumpFsm';
+import { useSuspensionBumpFsm } from './useSuspensionBumpFsm';
+import { useForegroundGpsStream } from './useForegroundGpsStream';
+import { MONO_FONT } from './oscilloscope/constants';
+import { HudMetricTile } from './oscilloscope/HudMetricTile';
+import { useOscilloscopeCalibration } from './oscilloscope/hooks/useOscilloscopeCalibration';
+import { useOscilloscopeSharedValues } from './oscilloscope/hooks/useOscilloscopeSharedValues';
+import { useOscilloscopeTelemetryEngine } from './oscilloscope/hooks/useOscilloscopeTelemetryEngine';
+import { styles } from './oscilloscope/styles';
+import { usePerformanceAnalyzer } from './usePerformanceAnalyzer';
+
+const CAL_PROGRESS_GREEN = '#34ff94';
+
+export default function PerformanceAnalyzerView(): React.ReactElement {
+  const { width: winW, height: winH } = useWindowDimensions();
+  const mono = (MONO_FONT as string) ?? 'monospace';
+  const sv = useOscilloscopeSharedValues(winW, winH);
+
+  const modalTrackW = useMemo(() => Math.max(220, Math.min(winW - 88, 380)), [winW]);
+
+  const calProgressFillStyle = useAnimatedStyle(
+    () => ({
+      width: sv.calProgressSv.value * modalTrackW,
+      height: '100%' as const,
+      borderRadius: 3,
+      backgroundColor: CAL_PROGRESS_GREEN,
+    }),
+    [modalTrackW, sv.calProgressSv]
+  );
+
+  const {
+    cleanVertZSv,
+    hasCalibSv,
+    bumpThresholdGsv,
+    stableZoneGsv,
+    stableHoldMssv,
+    harshPeakGsv,
+    overdampedSettlingMssv,
+    zeroCrossEpsGsv,
+  } = sv;
+
+  const onDiagnosticsReady = useCallback(
+    (_front: SuspensionBumpDiagResult, _rear: SuspensionBumpDiagResult | null) => {},
+    []
+  );
+
+  const clearBumpDiagnostics = useCallback(() => {}, []);
+
+  const { resetBumpFsm } = useSuspensionBumpFsm({
+    vertZ: cleanVertZSv,
+    hasCalib: hasCalibSv,
+    pitchDeg: sv.dspPitchDeg,
+    onDiagnosticsReady,
+    bumpThresholdG: bumpThresholdGsv,
+    stableZoneG: stableZoneGsv,
+    stableHoldMs: stableHoldMssv,
+    harshPeakG: harshPeakGsv,
+    overdampedSettlingMs: overdampedSettlingMssv,
+    zeroCrossEpsG: zeroCrossEpsGsv,
+    speedKmH: sv.speedKmH,
+  });
+
+  const appendHfData = useMemo(() => (_z: number, _p: number, _r: number, _s: number) => {}, []);
+
+  const isHfLoggingSv = useSharedValue(0);
+
+  const noopSetAdv = useCallback((_u: SetStateAction<boolean>) => {}, []);
+
+  const [precisionCalBusy, setPrecisionCalBusy] = useState(false);
+  const settlePrecisionCalib = useCallback(() => setPrecisionCalBusy(false), []);
+
+  const { hud } = useOscilloscopeTelemetryEngine(
+    winW,
+    winH,
+    false,
+    noopSetAdv,
+    sv,
+    isHfLoggingSv,
+    appendHfData,
+    settlePrecisionCalib
+  );
+
+  const { startPrecisionCalibrate } = useOscilloscopeCalibration({
+    sv,
+    resetBumpFsm,
+    clearBumpDiagnostics,
+    setPrecisionCalibBusy: setPrecisionCalBusy,
+  });
+
+  useForegroundGpsStream({ speedKmH: sv.speedKmH });
+
+  const { latestResult, clearLatest } = usePerformanceAnalyzer({
+    speedKmH: sv.speedKmH,
+    pitchDeg: sv.dspPitchDeg,
+    hasCalibSv: sv.hasCalibSv,
+  });
+
+  const recentPerformanceLine = latestResult
+    ? latestResult.type === 'ACCEL'
+      ? `0-60 km/h: ${latestResult.timeSeconds.toFixed(2)} sec (Squat: +${latestResult.maxPitchDeg.toFixed(1)}°)`
+      : `60-0 km/h: ${latestResult.distanceMeters.toFixed(2)} meters (Dive: ${latestResult.maxPitchDeg.toFixed(1)}°)`
+    : 'Idle — auto-detects squat launch (0-60) or dive braking (60-0).';
+
+  return (
+    <>
+      <Modal
+        visible={precisionCalBusy}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => {}}
+      >
+        <View style={styles.calModalBackdrop} pointerEvents="box-none">
+          <View style={styles.calModalCard} accessibilityRole="progressbar">
+            <Text style={[styles.calPrecTitle, { fontFamily: mono }]}>
+              CALIBRATING... KEEP BIKE UPRIGHT
+            </Text>
+            <View style={[styles.calModalProgressTrack, { width: modalTrackW }]}>
+              <Animated.View style={calProgressFillStyle} />
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <ScrollView style={styles.bottomPanel} contentContainerStyle={{ paddingBottom: 28, gap: 16 }}>
+        <Text style={[styles.performanceAnalyzerTitle, { fontFamily: mono }]}>Brake Analyzer</Text>
+        <Text style={[styles.performanceBullet, { fontFamily: mono }]}>
+          ● Accel: creep below ~2 km/h with squat (+pitch &gt; ~1.5°), then accelerate to ≥60 km/h.
+        </Text>
+        <Text style={[styles.performanceBullet, { fontFamily: mono }]}>
+          ● Brake: &gt;~40 km/h — hard braking with dive (pitch &lt; ~−2° and sharp speed drop).
+        </Text>
+
+        <View style={styles.hudSection}>
+          <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Performance</Text>
+          <View style={styles.performanceCard}>
+            <Text style={[styles.performanceCardTitle, { fontFamily: mono }]}>RECENT</Text>
+            <Text style={[styles.performanceCardMetric, { fontFamily: mono }]}>
+              {recentPerformanceLine}
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Clear last performance result display"
+              disabled={precisionCalBusy}
+              hitSlop={8}
+              onPress={clearLatest}
+            >
+              <Text style={[styles.performanceHint, { fontFamily: mono }]}>Clear display</Text>
+            </Pressable>
+            <Text style={[styles.performanceHint, { fontFamily: mono }]}>
+              GPS speed + IMU CAL required. Stay on this tab during a run so capture stays live.
+            </Text>
+          </View>
+        </View>
+
+        <View style={styles.hudSection}>
+          <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Live</Text>
+          <View style={styles.hudMetricRow}>
+            <HudMetricTile label="SPD" value={hud.speed.toFixed(1)} suffix="km/h" mono={mono} />
+            <HudMetricTile
+              label="Pitch"
+              value={`${hud.pitch >= 0 ? '+' : ''}${hud.pitch.toFixed(1)}`}
+              suffix="°"
+              mono={mono}
+            />
+          </View>
+        </View>
+
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Calibrate IMU for gravity reference (~3 seconds)"
+          disabled={precisionCalBusy}
+          onPress={startPrecisionCalibrate}
+          style={({ pressed }) => [
+            styles.calBtn,
+            precisionCalBusy && styles.calBtnDisabled,
+            pressed && styles.calBtnPressed,
+            { alignSelf: 'flex-start', paddingHorizontal: 20, paddingVertical: 14 },
+          ]}
+        >
+          <View pointerEvents="none" style={styles.calGlow} />
+          <Text style={[styles.calLabel, { fontFamily: mono }]}>CAL SENSOR</Text>
+        </Pressable>
+
+        <Text style={[styles.performanceHint, { fontFamily: mono }]}>
+          GPS speed feeds this tab automatically. Calibrate stationary before sprint or brake tests.
+        </Text>
+      </ScrollView>
+    </>
+  );
+}
+</file>
+
+<file path="components/telemetry/GpsTrackLogger.tsx">
+import * as FileSystem from 'expo-file-system/legacy';
+import {
+  activateKeepAwakeAsync,
+  deactivateKeepAwake,
+} from 'expo-keep-awake';
+import * as Sharing from 'expo-sharing';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Alert, Pressable, StyleSheet, Text } from 'react-native';
+import { runOnUI } from 'react-native-reanimated';
+import type { SharedValue } from 'react-native-reanimated';
+
+import { useForegroundGpsStream } from './useForegroundGpsStream';
+
+const KEEP_AWAKE_TAG_GPS_REC = 'LaudaPerformanceGpsRec';
+
+/** GPX / heatmap-ready track sample (logged when moving with REC on). */
+export type TrackPoint = {
+  lat: number;
+  lon: number;
+  ele: number;
+  speed: number;
+  maxZ: number;
+  /** Motorcycle lean angle (deg), instantaneous from accel HUD pipeline. */
+  roll: number;
+  /** Motorcycle pitch angle (deg), instantaneous from accel HUD pipeline. */
+  pitch: number;
+  time: string;
+};
+
+export type GpsTrackLoggerProps = {
+  speedKmH: SharedValue<number>;
+  dspPeakVertZSv: SharedValue<number>;
+  dspPitchDeg: SharedValue<number>;
+  dspRollDeg: SharedValue<number>;
+  dashLocked: boolean;
+  mono: string;
+};
+
+export function GpsTrackLogger({
+  speedKmH,
+  dspPeakVertZSv,
+  dspPitchDeg,
+  dspRollDeg,
+  dashLocked,
+  mono,
+}: GpsTrackLoggerProps) {
+  const [trackLog, setTrackLog] = useState<TrackPoint[]>([]);
+  const [isLogging, setIsLogging] = useState(false);
+
+  const isLoggingRef = useRef(false);
+  useEffect(() => {
+    isLoggingRef.current = isLogging;
+  }, [isLogging]);
+
+  /** While recording: keep screen awake — reduces OEM sleep/dim stalls that stall GPS/UI updates while still foregrounded. */
+  useEffect(() => {
+    if (isLogging) {
+      void activateKeepAwakeAsync(KEEP_AWAKE_TAG_GPS_REC);
+      return () => {
+        void deactivateKeepAwake(KEEP_AWAKE_TAG_GPS_REC);
+      };
+    }
+    void deactivateKeepAwake(KEEP_AWAKE_TAG_GPS_REC);
+  }, [isLogging]);
+
+  const trackLogLengthRef = useRef(0);
+  trackLogLengthRef.current = trackLog.length;
+
+  useForegroundGpsStream({
+    speedKmH,
+    onSample: (sample) => {
+      const s = sample.speedMs;
+      if (!isLoggingRef.current || s <= 0) {
+        return;
+      }
+
+      const lat = sample.latitude;
+      const lon = sample.longitude;
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        return;
+      }
+
+      const maxZ = dspPeakVertZSv.value;
+      const roll = dspRollDeg.value;
+      const pitch = dspPitchDeg.value;
+      const ele = sample.altitude;
+      const spdKmh = s * 3.6;
+      const timeStr =
+        sample.timestampMs > 0 ? new Date(sample.timestampMs).toISOString() : new Date().toISOString();
+
+      const point: TrackPoint = {
+        lat,
+        lon,
+        ele: ele != null && Number.isFinite(ele) ? ele : 0,
+        speed: spdKmh,
+        maxZ,
+        roll,
+        pitch,
+        time: timeStr,
+      };
+
+      setTrackLog((prev) => [...prev, point]);
+
+      runOnUI(() => {
+        'worklet';
+        dspPeakVertZSv.value = 0;
+      })();
+    },
+  });
+
+  const toggleTrackLogging = useCallback(() => {
+    setIsLogging((prev) => {
+      if (prev) {
+        Alert.alert('Track stopped', `Array has ${trackLogLengthRef.current} points.`);
+        return false;
+      }
+      return true;
+    });
+  }, []);
+
+  const exportToGPX = useCallback(async () => {
+    if (trackLog.length === 0) {
+      Alert.alert('No track data to export');
+      return;
+    }
+
+    let gpxString = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="LaudaPerformance">\n  <trk>\n    <name>Suspension Telemetry</name>\n    <trkseg>\n`;
+
+    trackLog.forEach((pt) => {
+      gpxString += `      <trkpt lat="${pt.lat}" lon="${pt.lon}">\n`;
+      gpxString += `        <ele>${pt.ele}</ele>\n`;
+      gpxString += `        <time>${pt.time}</time>\n`;
+      gpxString += `        <extensions>\n          <speed>${pt.speed}</speed>\n          <maxZ>${pt.maxZ.toFixed(3)}</maxZ>\n          <roll>${pt.roll.toFixed(1)}</roll>\n          <pitch>${pt.pitch.toFixed(1)}</pitch>\n        </extensions>\n`;
+      gpxString += `      </trkpt>\n`;
+    });
+
+    gpxString += `    </trkseg>\n  </trk>\n</gpx>`;
+
+    const baseUri = FileSystem.documentDirectory;
+    if (!baseUri) {
+      Alert.alert('Export failed', 'Documents directory unavailable.');
+      return;
+    }
+
+    const fileUri = `${baseUri}LaudaTelemetry_${new Date().getTime()}.gpx`;
+
+    try {
+      await FileSystem.writeAsStringAsync(fileUri, gpxString, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      await Sharing.shareAsync(fileUri);
+    } catch (e) {
+      Alert.alert('Export failed', e instanceof Error ? e.message : 'Could not write or share the GPX file.');
+    }
+  }, [trackLog]);
+
+  return (
+    <>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={isLogging ? 'Stop GPS track recording' : 'Start GPS track recording'}
+        disabled={dashLocked}
+        onPress={toggleTrackLogging}
+        style={({ pressed }) => [
+          styles.recBtn,
+          dashLocked && styles.recBtnDisabled,
+          isLogging && styles.recBtnOn,
+          pressed && styles.recBtnPressed,
+        ]}
+      >
+        <Text style={[styles.recLabel, { fontFamily: mono }]}>{isLogging ? 'REC ●' : 'REC'}</Text>
+      </Pressable>
+
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Export track as GPX file"
+        disabled={isLogging || dashLocked}
+        onPress={() => {
+          void exportToGPX();
+        }}
+        style={({ pressed }) => [
+          styles.exportGpxBtn,
+          (isLogging || dashLocked) && styles.exportGpxBtnDisabled,
+          pressed && styles.exportGpxBtnPressed,
+        ]}
+      >
+        <Text style={[styles.exportGpxLabel, { fontFamily: mono }]}>EXPORT GPX</Text>
+      </Pressable>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  recBtn: {
+    paddingHorizontal: 18,
+    paddingVertical: 16,
+    borderRadius: 8,
+    backgroundColor: '#14080a',
+    borderWidth: 1.5,
+    borderColor: '#ff5c73',
+    minWidth: 84,
+    alignItems: 'center',
+  },
+  recBtnOn: {
+    backgroundColor: '#2a0610',
+    borderColor: '#ff2150',
+  },
+  recBtnDisabled: {
+    opacity: 0.35,
+  },
+  recBtnPressed: {
+    opacity: 0.88,
+  },
+  recLabel: {
+    color: '#ff8fa3',
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: 1.6,
+  },
+  exportGpxBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 14,
+    borderRadius: 8,
+    backgroundColor: '#0a1210',
+    borderWidth: 1,
+    borderColor: '#3d6b5a',
+    minWidth: 108,
+    alignItems: 'center',
+  },
+  exportGpxBtnDisabled: {
+    opacity: 0.35,
+  },
+  exportGpxBtnPressed: {
+    opacity: 0.88,
+  },
+  exportGpxLabel: {
+    color: '#7dd4b0',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
+});
+</file>
+
+<file path="components/ui/icon-symbol.tsx">
+// Fallback for using MaterialIcons on Android and web.
+
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { SymbolWeight, SymbolViewProps } from 'expo-symbols';
+import { ComponentProps } from 'react';
+import { OpaqueColorValue, type StyleProp, type TextStyle } from 'react-native';
+
+type MaterialIconName = ComponentProps<typeof MaterialIcons>['name'];
+
+/**
+ * Add your SF Symbols to Material Icons mappings here.
+ * - see Material Icons in the [Icons Directory](https://icons.expo.fyi).
+ * - see SF Symbols in the [SF Symbols](https://developer.apple.com/sf-symbols/) app.
+ */
+const MAPPING = {
+  'house.fill': 'home',
+  'paperplane.fill': 'send',
+  'chevron.left.forwardslash.chevron.right': 'code',
+  'chevron.right': 'chevron-right',
+  'waveform.path.ecg': 'multiline-chart',
+  'stopwatch.fill': 'timer',
+  'bolt.fill': 'flash-on',
+} as const satisfies Partial<Record<SymbolViewProps['name'], MaterialIconName>>;
+
+type IconSymbolName = keyof typeof MAPPING;
+
+/**
+ * An icon component that uses native SF Symbols on iOS, and Material Icons on Android and web.
+ * This ensures a consistent look across platforms, and optimal resource usage.
+ * Icon `name`s are based on SF Symbols and require manual mapping to Material Icons.
+ */
+export function IconSymbol({
+  name,
+  size = 24,
+  color,
+  style,
+}: {
+  name: IconSymbolName;
+  size?: number;
+  color: string | OpaqueColorValue;
+  style?: StyleProp<TextStyle>;
+  weight?: SymbolWeight;
+}) {
+  return <MaterialIcons color={color} size={size} name={MAPPING[name]} style={style} />;
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/hooks/useOscilloscopeCalibration.ts">
+import { useCallback } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
+import { runOnUI } from 'react-native-reanimated';
+
+import type { OscilloscopeSharedValues } from './useOscilloscopeSharedValues';
+
+type CalibrationParams = {
+  sv: OscilloscopeSharedValues;
+  resetBumpFsm: () => void;
+  clearBumpDiagnostics: () => void;
+  /** When non-null (e.g. OscilloscopeView), disables CAL buttons while precision cal runs */
+  setPrecisionCalibBusy?: Dispatch<SetStateAction<boolean>>;
+};
+
+export function useOscilloscopeCalibration({
+  sv,
+  resetBumpFsm,
+  clearBumpDiagnostics,
+  setPrecisionCalibBusy,
+}: CalibrationParams) {
+  const {
+    calStateSv,
+    calStartMsSv,
+    calSumX,
+    calSumY,
+    calSumZ,
+    calCount,
+    calProgressSv,
+    hasCalibSv,
+    dspPeakG,
+    peakFifo0Sv,
+    peakFifo1Sv,
+    peakFifo2Sv,
+    peakFifo3Sv,
+    dspPeakRollLeftDeg,
+    dspPeakRollRightDeg,
+    dspPeakVertZSv,
+  } = sv;
+
+  const startPrecisionCalibrate = useCallback(() => {
+    setPrecisionCalibBusy?.(true);
+    resetBumpFsm();
+    clearBumpDiagnostics();
+    runOnUI(() => {
+      'worklet';
+      calSumX.value = 0;
+      calSumY.value = 0;
+      calSumZ.value = 0;
+      calCount.value = 0;
+      calProgressSv.value = 0;
+      hasCalibSv.value = 0;
+      calStartMsSv.value = Date.now();
+      calStateSv.value = 1;
+    })();
+  }, [
+    calCount,
+    calProgressSv,
+    calStartMsSv,
+    calStateSv,
+    calSumX,
+    calSumY,
+    calSumZ,
+    clearBumpDiagnostics,
+    hasCalibSv,
+    resetBumpFsm,
+    setPrecisionCalibBusy,
+  ]);
+
+  const resetPeakMax = useCallback(() => {
+    runOnUI(() => {
+      'worklet';
+      dspPeakG.value = 0;
+      peakFifo0Sv.value = 0;
+      peakFifo1Sv.value = 0;
+      peakFifo2Sv.value = 0;
+      peakFifo3Sv.value = 0;
+      dspPeakRollLeftDeg.value = 0;
+      dspPeakRollRightDeg.value = 0;
+      dspPeakVertZSv.value = 0;
+    })();
+  }, [
+    dspPeakG,
+    peakFifo0Sv,
+    peakFifo1Sv,
+    peakFifo2Sv,
+    peakFifo3Sv,
+    dspPeakRollLeftDeg,
+    dspPeakRollRightDeg,
+    dspPeakVertZSv,
+  ]);
+
+  return { startPrecisionCalibrate, resetPeakMax };
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/OscilloscopeChart.tsx">
+import React from 'react';
+import { Text, View, type LayoutChangeEvent } from 'react-native';
+import Animated, { useAnimatedStyle } from 'react-native-reanimated';
+import type { SharedValue } from 'react-native-reanimated';
+import { Canvas, Fill, Path, type SkPath } from '@shopify/react-native-skia';
+
+import { TERRAIN_POTHOLE, TERRAIN_SPEED_BUMP } from './dspConstants';
+import { styles } from './styles';
+
+const FRONT_GREEN = '#34ff94';
+
+export type OscilloscopeChartProps = {
+  gridPath: SharedValue<SkPath>;
+  baselinePath: SharedValue<SkPath>;
+  oscilloscopePath: SharedValue<SkPath>;
+  terrainKindSv: SharedValue<number>;
+  terrainOverlayOpacitySv: SharedValue<number>;
+  onLayout: (e: LayoutChangeEvent) => void;
+  mono: string;
+  calStateSv: SharedValue<number>;
+  calProgressSv: SharedValue<number>;
+  chartWsv: SharedValue<number>;
+};
+
+export function OscilloscopeChart({
+  gridPath,
+  baselinePath,
+  oscilloscopePath,
+  terrainKindSv,
+  terrainOverlayOpacitySv,
+  onLayout,
+  mono,
+  calStateSv,
+  calProgressSv,
+  chartWsv,
+}: OscilloscopeChartProps) {
+  const bumpStyle = useAnimatedStyle(() => ({
+    position: 'absolute',
+    top: 10,
+    right: 12,
+    opacity:
+      terrainKindSv.value === TERRAIN_SPEED_BUMP ? terrainOverlayOpacitySv.value : 0,
+    pointerEvents: 'none',
+  }));
+
+  const potholeStyle = useAnimatedStyle(() => ({
+    position: 'absolute',
+    top: 42,
+    right: 12,
+    opacity:
+      terrainKindSv.value === TERRAIN_POTHOLE ? terrainOverlayOpacitySv.value : 0,
+    pointerEvents: 'none',
+  }));
+
+  const calOverlayStyle = useAnimatedStyle(() => ({
+    opacity: calStateSv.value === 1 ? 1 : 0,
+    pointerEvents: 'none',
+  }));
+
+  const calProgressFillStyle = useAnimatedStyle(() => {
+    const trackW = Math.max(80, chartWsv.value * 0.88);
+    return {
+      height: '100%',
+      borderRadius: 3,
+      backgroundColor: FRONT_GREEN,
+      width: calProgressSv.value * trackW,
+    };
+  });
+
+  return (
+    <View style={styles.chartWrap} onLayout={onLayout}>
+      <Canvas style={styles.canvas}>
+        <Fill color="#010101" />
+        <Path style="stroke" path={gridPath} color="#242424" strokeWidth={1} strokeCap="square" />
+        <Path style="stroke" path={baselinePath} color="#173d2f" strokeWidth={1} strokeCap="round" />
+        <Path
+          style="stroke"
+          path={oscilloscopePath}
+          color={FRONT_GREEN}
+          strokeWidth={2.35}
+          strokeJoin="round"
+          strokeCap="round"
+        />
+      </Canvas>
+
+      <Animated.View style={bumpStyle}>
+        <Text style={[styles.terrainIcon, { fontFamily: mono }]}>⛰</Text>
+      </Animated.View>
+      <Animated.View style={potholeStyle}>
+        <Text style={[styles.terrainIcon, { fontFamily: mono }]}>🕳</Text>
+      </Animated.View>
+
+      <Animated.View style={[styles.calPrecOverlay, calOverlayStyle]} pointerEvents="none">
+        <Text style={[styles.calPrecTitle, { fontFamily: mono }]}>
+          CALIBRATING... KEEP BIKE UPRIGHT
+        </Text>
+        <View style={styles.calPrecTrack}>
+          <Animated.View style={calProgressFillStyle} />
+        </View>
+      </Animated.View>
+    </View>
+  );
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/OscilloscopeDashboard.tsx">
+import Ionicons from '@expo/vector-icons/Ionicons';
+import React from 'react';
+import { Pressable, ScrollView, Text, View } from 'react-native';
+
+import { AxisBumpAdviceCard } from './AxisBumpAdviceCard';
+import { GpsTrackLogger } from '../GpsTrackLogger';
+import { OscilloscopeSettingsDrawer } from './OscilloscopeSettingsDrawer';
+import type { TelemetryPresetId, TelemetryPresetMode } from '../telemetryPresets';
+import { HudMetricTile } from './HudMetricTile';
+import type { HudSnap } from './types';
+import type { SuspensionBumpDiagResult } from '../useSuspensionBumpFsm';
+import type { OscilloscopeSharedValues } from './hooks/useOscilloscopeSharedValues';
+import { styles } from './styles';
+
+export type OscilloscopeDashboardProps = {
+  mono: string;
+  bottomInsetPad: number;
+
+  dashLocked: boolean;
+  setDashLocked: React.Dispatch<React.SetStateAction<boolean>>;
+
+  advancedSettingsOpen: boolean;
+  setAdvancedSettingsOpen: React.Dispatch<React.SetStateAction<boolean>>;
+
+  hud: HudSnap;
+
+  frontBumpDiag: SuspensionBumpDiagResult | null;
+  rearBumpDiag: SuspensionBumpDiagResult | null;
+
+  telemetryPresetMode: TelemetryPresetMode;
+  telemetryPresetLabel: string;
+  selectTelemetryPreset: (id: TelemetryPresetId) => void;
+
+  sv: OscilloscopeSharedValues;
+  dspPresetSyncNonce: number;
+  setTelemetryPresetMode: React.Dispatch<React.SetStateAction<TelemetryPresetMode>>;
+
+  precisionCalBusy: boolean;
+  resetPeakMax: () => void;
+  startPrecisionCalibrate: () => void;
+
+  isHfLogging: boolean;
+  toggleHfLog: () => void;
+  exportToJSON: () => void;
+};
+
+export function OscilloscopeDashboard({
+  mono,
+  bottomInsetPad,
+  dashLocked,
+  setDashLocked,
+  advancedSettingsOpen,
+  setAdvancedSettingsOpen,
+  hud,
+  frontBumpDiag,
+  rearBumpDiag,
+  telemetryPresetMode,
+  telemetryPresetLabel,
+  selectTelemetryPreset,
+  sv,
+  dspPresetSyncNonce,
+  setTelemetryPresetMode,
+  precisionCalBusy,
+  resetPeakMax,
+  startPrecisionCalibrate,
+  isHfLogging,
+  toggleHfLog,
+  exportToJSON,
+}: OscilloscopeDashboardProps) {
+  const { speedKmH, dspPeakVertZSv, dspPitchDeg, dspRollDeg } = sv;
+
+  const rearWaitingPlaceholder =
+    frontBumpDiag !== null && rearBumpDiag === null ? 'Waiting for rear impact…' : null;
+
+  return (
+    <>
+      <ScrollView style={[styles.bottomPanel]} contentContainerStyle={{ paddingBottom: 12 + bottomInsetPad }}>
+      <View style={styles.hudTopBar}>
+        <View style={styles.logoCluster}>
+          <Text style={[styles.logo, { fontFamily: mono }]}>LAUDA Performance</Text>
+          <Text style={[styles.logoSub, { fontFamily: mono }]}>OSC DIAGRAM</Text>
+          <Text style={[styles.presetDashboardBadge, { fontFamily: mono }]} numberOfLines={1}>
+            Preset · {telemetryPresetLabel}
+          </Text>
+        </View>
+        <View style={styles.dashboardTools}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={dashLocked ? 'Unlock dashboard controls' : 'Lock dashboard controls'}
+            onPress={() => setDashLocked((v) => !v)}
+            style={({ pressed }) => [styles.toolBtn, pressed && styles.toolBtnPressed]}
+          >
+            <Ionicons
+              name={dashLocked ? 'lock-closed' : 'lock-open-outline'}
+              size={22}
+              color={dashLocked ? '#5cff9b' : '#6b7a72'}
+            />
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open advanced filter settings"
+            disabled={dashLocked}
+            onPress={() => !dashLocked && setAdvancedSettingsOpen(true)}
+            style={({ pressed }) => [
+              styles.toolBtn,
+              dashLocked && styles.toolBtnDisabled,
+              pressed && styles.toolBtnPressed,
+            ]}
+          >
+            <Ionicons name="settings-outline" size={22} color={dashLocked ? '#3a453f' : '#6b7a72'} />
+          </Pressable>
+        </View>
+      </View>
+
+      <View style={styles.presetSwitchRow}>
+        <View style={[styles.presetSegmentTrack, dashLocked && styles.presetSegmentTrackLocked]}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="High speed bump preset — lower chart gain, bump analysis above 0.35 g"
+            accessibilityState={{ selected: telemetryPresetMode === 'HIGH_SPEED_IMPACT' }}
+            disabled={dashLocked}
+            onPress={() => selectTelemetryPreset('HIGH_SPEED_IMPACT')}
+            style={({ pressed }) => [
+              styles.presetSegmentBtn,
+              styles.presetSegmentLeft,
+              telemetryPresetMode === 'HIGH_SPEED_IMPACT' && styles.presetSegmentBtnActive,
+              pressed && telemetryPresetMode !== 'HIGH_SPEED_IMPACT' && styles.presetSegmentBtnPressed,
+              dashLocked && styles.presetSegmentBtnDisabled,
+            ]}
+          >
+            <Text
+              style={[
+                styles.presetSegmentLbl,
+                telemetryPresetMode === 'HIGH_SPEED_IMPACT' && styles.presetSegmentLblActive,
+                { fontFamily: mono },
+              ]}
+            >
+              IMPACT
+            </Text>
+          </Pressable>
+          <View style={styles.presetSegmentDivider} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Smooth micro-vibration preset — higher alpha and gain, bump threshold 0.10 g"
+            accessibilityState={{ selected: telemetryPresetMode === 'SMOOTH_SURFACE' }}
+            disabled={dashLocked}
+            onPress={() => selectTelemetryPreset('SMOOTH_SURFACE')}
+            style={({ pressed }) => [
+              styles.presetSegmentBtn,
+              styles.presetSegmentRight,
+              telemetryPresetMode === 'SMOOTH_SURFACE' && styles.presetSegmentBtnActive,
+              pressed && telemetryPresetMode !== 'SMOOTH_SURFACE' && styles.presetSegmentBtnPressed,
+              dashLocked && styles.presetSegmentBtnDisabled,
+            ]}
+          >
+            <Text
+              style={[
+                styles.presetSegmentLbl,
+                telemetryPresetMode === 'SMOOTH_SURFACE' && styles.presetSegmentLblActive,
+                { fontFamily: mono },
+              ]}
+            >
+              CHATTER
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+
+      <View style={styles.hudMetricsPanel}>
+        <View style={styles.hudSection}>
+          <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Motion</Text>
+          <View style={styles.hudMetricRow}>
+            <HudMetricTile label="SPD" value={hud.speed.toFixed(1)} suffix="km/h" mono={mono} />
+            <HudMetricTile
+              label="Pitch"
+              value={`${hud.pitch >= 0 ? '+' : ''}${hud.pitch.toFixed(1)}`}
+              suffix="°"
+              mono={mono}
+            />
+            <HudMetricTile
+              label="Roll"
+              value={`${hud.roll >= 0 ? '+' : ''}${hud.roll.toFixed(1)}`}
+              suffix="°"
+              mono={mono}
+            />
+          </View>
+        </View>
+
+        <View style={styles.hudSection}>
+          <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Acceleration</Text>
+          <View style={styles.hudMetricRow}>
+            <HudMetricTile label="Peak G" value={hud.peak.toFixed(2)} suffix="g" alert mono={mono} />
+            <HudMetricTile label="Vert Z" value={hud.zG.toFixed(2)} suffix="g" muted mono={mono} />
+          </View>
+        </View>
+
+        <View style={styles.hudSection}>
+          <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Suspension · dual axis</Text>
+          <View style={styles.bumpAdviceRowDual}>
+            <AxisBumpAdviceCard
+              axisTitle="Front Fork"
+              diag={frontBumpDiag}
+              mono={mono}
+              showPitchBadge
+              rearWaitingPlaceholder={null}
+            />
+            <AxisBumpAdviceCard
+              axisTitle="Rear Shock"
+              diag={rearBumpDiag}
+              mono={mono}
+              showPitchBadge={false}
+              rearWaitingPlaceholder={rearWaitingPlaceholder}
+            />
+          </View>
+        </View>
+
+        {/*<View style={styles.hudSection}>*/}
+        {/*  <View style={styles.hudMetricRow}>*/}
+        {/*    <HudMetricTile label="Roll left" value={hud.peakRollLeft.toFixed(1)} suffix="°" mono={mono} />*/}
+        {/*    <HudMetricTile label="Roll right" value={hud.peakRollRight.toFixed(1)} suffix="°" mono={mono} />*/}
+        {/*    <HudMetricTile label="Peak Vert Z" value={hud.peakVertZ.toFixed(2)} suffix="g" mono={mono} />*/}
+        {/*  </View>*/}
+        {/*</View>*/}
+      </View>
+
+      <View style={styles.calRow}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Reset peak G and angle maximums to zero"
+          disabled={dashLocked || precisionCalBusy}
+          onPress={resetPeakMax}
+          style={({ pressed }) => [
+            styles.resetMaxBtn,
+            (dashLocked || precisionCalBusy) && styles.resetMaxBtnDisabled,
+            pressed && styles.resetMaxBtnPressed,
+          ]}
+        >
+          <Text style={[styles.resetMaxLabel, { fontFamily: mono }]}>RESET MAX</Text>
+        </Pressable>
+        <GpsTrackLogger
+          speedKmH={speedKmH}
+          dspPeakVertZSv={dspPeakVertZSv}
+          dspPitchDeg={dspPitchDeg}
+          dspRollDeg={dspRollDeg}
+          dashLocked={dashLocked}
+          mono={mono}
+        />
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Precision calibration: average gravity axis over ~3 seconds. Long press to open filter settings."
+          disabled={precisionCalBusy}
+          onPress={startPrecisionCalibrate}
+          onLongPress={() => {
+            if (!dashLocked && !precisionCalBusy) setAdvancedSettingsOpen(true);
+          }}
+          delayLongPress={450}
+          style={() => [styles.calBtn, precisionCalBusy && styles.calBtnDisabled]}
+        >
+          <View pointerEvents="none" style={styles.calGlow} />
+          <Text style={[styles.calLabel, { fontFamily: mono }]}>CAL</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.hfTelemetryRow}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={isHfLogging ? 'Stop high-frequency JSON telemetry' : 'Start high-frequency JSON telemetry'}
+          disabled={dashLocked}
+          onPress={toggleHfLog}
+          style={({ pressed }) => [
+            styles.hfJsonRecBtn,
+            dashLocked && styles.hfJsonRecBtnDisabled,
+            isHfLogging && styles.hfJsonRecBtnOn,
+            pressed && styles.hfJsonRecBtnPressed,
+          ]}
+        >
+          <Text style={[styles.hfJsonRecLabel, { fontFamily: mono }]}>{isHfLogging ? 'REC JSON ●' : 'REC JSON'}</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Export HF telemetry JSON"
+          disabled={isHfLogging || dashLocked}
+          onPress={() => {
+            void exportToJSON();
+          }}
+          style={({ pressed }) => [
+            styles.hfJsonExportBtn,
+            (isHfLogging || dashLocked) && styles.hfJsonExportBtnDisabled,
+            pressed && styles.hfJsonExportBtnPressed,
+          ]}
+        >
+          <Text style={[styles.hfJsonExportLabel, { fontFamily: mono }]}>EXP JSON</Text>
+        </Pressable>
+      </View>
+    </ScrollView>
+      <OscilloscopeSettingsDrawer
+        visible={advancedSettingsOpen && !dashLocked}
+        onClose={() => setAdvancedSettingsOpen(false)}
+        mono={mono}
+        sv={sv}
+        dspPresetSyncNonce={dspPresetSyncNonce}
+        setTelemetryPresetMode={setTelemetryPresetMode}
+      />
+    </>
+  );
+}
+</file>
+
+<file path="components/telemetry/telemetryPresets.ts">
+import type { SharedValue } from 'react-native-reanimated';
+
+export type PresetConfig = {
+  alpha: number;
+  multiplier: number;
+  threshold: number;
+  stableZone: number;
+  stableHoldMs: number;
+  harshPeakG: number;
+  overdampedSettlingMs: number;
+  name: string;
+};
+
+/**
+ * RACING / HIGH SPEED: Stiff suspension.
+ * Expected to settle very quickly (under 450ms). Hard impacts expected.
+ */
+export const HIGH_SPEED_IMPACT_PRESET: PresetConfig = {
+  alpha: 0.06,
+  multiplier: 2.5,
+  threshold: 0.35,
+  stableZone: 0.15,
+  stableHoldMs: 150,
+  harshPeakG: 1.5,
+  overdampedSettlingMs: 450,
+  name: 'Sport / Stiff',
+};
+
+/**
+ * CITY COMFORT @ 60 km/h: Plush, long-travel suspension.
+ * Allows for "boat-like" floating (stableZone 0.18).
+ * Needs longer to settle before calling underdamped/overdamped (850ms harsh band).
+ */
+export const SMOOTH_SURFACE_PRESET: PresetConfig = {
+  alpha: 0.15,
+  multiplier: 3.0,
+  threshold: 0.15,
+  stableZone: 0.18,
+  stableHoldMs: 200,
+  harshPeakG: 1.2,
+  overdampedSettlingMs: 850,
+  name: 'City Comfort',
+};
+
+export const TELEMETRY_PRESETS = {
+  HIGH_SPEED_IMPACT: HIGH_SPEED_IMPACT_PRESET,
+  SMOOTH_SURFACE: SMOOTH_SURFACE_PRESET,
+} as const;
+
+export type TelemetryPresetId = keyof typeof TELEMETRY_PRESETS;
+
+export type TelemetryPresetMode = TelemetryPresetId | 'custom';
+
+export type TelemetryPresetTargets = {
+  vertFastAlphaSv: SharedValue<number>;
+  sensitivityMultiplierSv: SharedValue<number>;
+  bumpThresholdG: SharedValue<number>;
+  stableZoneG: SharedValue<number>;
+  stableHoldMs: SharedValue<number>;
+  harshPeakG: SharedValue<number>;
+  overdampedSettlingMs: SharedValue<number>;
+};
+
+/** Apply preset DSP/FSM gates on the JS thread; SharedValues are read immediately in worklets. */
+export function applyPresetConfig(cfg: PresetConfig, targets: TelemetryPresetTargets): void {
+  targets.vertFastAlphaSv.value = cfg.alpha;
+  targets.sensitivityMultiplierSv.value = cfg.multiplier;
+  targets.bumpThresholdG.value = cfg.threshold;
+  targets.stableZoneG.value = cfg.stableZone;
+  targets.stableHoldMs.value = cfg.stableHoldMs;
+  targets.harshPeakG.value = cfg.harshPeakG;
+  targets.overdampedSettlingMs.value = cfg.overdampedSettlingMs;
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/hooks/useOscilloscopeSharedValues.ts">
+import { useSharedValue } from 'react-native-reanimated';
+
+import { BUFFER_LEN } from '../constants';
+
+/**
+ * All UI-thread telemetry state for accel projection, waveform buffer, HUD, and DSP sliders.
+ * `chartW/H` bootstrap from window size; layout + effects keep SVs aligned on resize.
+ *
+ * `cleanVertZSv` — linear vertical Δg (vertical accel projected on gravity − 1g), smoothed via EMA (`vertFastAlphaSv`) for chart / FSM / HUD.
+ */
+export function useOscilloscopeSharedValues(winW: number, winH: number) {
+  const chartWsv = useSharedValue(Math.max(winW, 120));
+  const chartHsv = useSharedValue(winH);
+
+  const rawAx = useSharedValue(0);
+  const rawAy = useSharedValue(0);
+  const rawAz = useSharedValue(1);
+
+  const gravUnitX = useSharedValue(0);
+  const gravUnitY = useSharedValue(0);
+  const gravUnitZ = useSharedValue(1);
+
+  /** EMA-low-pass vertical Δg output (same channel used for bumps, terrain classifier, waveform buffer). */
+  const cleanVertZSv = useSharedValue(0);
+  const hasCalibSv = useSharedValue(0);
+
+  const vertFastAlphaSv = useSharedValue(0.06);
+  const sensitivityMultiplierSv = useSharedValue(2.5);
+  const bumpThresholdGsv = useSharedValue(0.35);
+  const stableZoneGsv = useSharedValue(0.15);
+  const stableHoldMssv = useSharedValue(150);
+  const harshPeakGsv = useSharedValue(1.5);
+  const overdampedSettlingMssv = useSharedValue(450);
+  const zeroCrossEpsGsv = useSharedValue(0.06);
+
+  const writeIdxSv = useSharedValue(0);
+  const waveData = useSharedValue(new Float32Array(BUFFER_LEN));
+  const sampleTick = useSharedValue(0);
+
+  const pitchFusDegSv = useSharedValue(0);
+  const rollFusDegSv = useSharedValue(0);
+  const pitchCalBiasDegSv = useSharedValue(0);
+  const rollCalBiasDegSv = useSharedValue(0);
+
+  const dspPitchDeg = useSharedValue(0);
+  const dspRollDeg = useSharedValue(0);
+  const dspPeakG = useSharedValue(0);
+  const dspPeakRollLeftDeg = useSharedValue(0);
+  const dspPeakRollRightDeg = useSharedValue(0);
+  const dspPeakVertZSv = useSharedValue(0);
+  const hudDisplayZSv = useSharedValue(0);
+  const peakFifo0Sv = useSharedValue(0);
+  const peakFifo1Sv = useSharedValue(0);
+  const peakFifo2Sv = useSharedValue(0);
+  const peakFifo3Sv = useSharedValue(0);
+
+  const speedKmH = useSharedValue(0);
+
+  /** Terrain classifier + overlay (numbers: see dspConstants). */
+  const terrainKindSv = useSharedValue(0);
+  const terrainSbStateSv = useSharedValue(0);
+  const terrainSbPeakTimeSv = useSharedValue(0);
+  const terrainPhStateSv = useSharedValue(0);
+  const terrainPhPeakTimeSv = useSharedValue(0);
+
+  /** 0 = no flash; else Date.now() at last terrain hit. */
+  const terrainFlashStartSv = useSharedValue(0);
+  const terrainOverlayOpacitySv = useSharedValue(0);
+
+  /** Precision IMU calibration: 0 IDLE, 1 CALIBRATING. */
+  const calStateSv = useSharedValue(0);
+  const calStartMsSv = useSharedValue(0);
+  const calSumX = useSharedValue(0);
+  const calSumY = useSharedValue(0);
+  const calSumZ = useSharedValue(0);
+  const calCount = useSharedValue(0);
+  const calProgressSv = useSharedValue(0);
+
+  return {
+    chartWsv,
+    chartHsv,
+    rawAx,
+    rawAy,
+    rawAz,
+    gravUnitX,
+    gravUnitY,
+    gravUnitZ,
+    cleanVertZSv,
+    hasCalibSv,
+    vertFastAlphaSv,
+    sensitivityMultiplierSv,
+    bumpThresholdGsv,
+    stableZoneGsv,
+    stableHoldMssv,
+    harshPeakGsv,
+    overdampedSettlingMssv,
+    zeroCrossEpsGsv,
+    writeIdxSv,
+    waveData,
+    sampleTick,
+    pitchFusDegSv,
+    rollFusDegSv,
+    pitchCalBiasDegSv,
+    rollCalBiasDegSv,
+    dspPitchDeg,
+    dspRollDeg,
+    dspPeakG,
+    dspPeakRollLeftDeg,
+    dspPeakRollRightDeg,
+    dspPeakVertZSv,
+    hudDisplayZSv,
+    peakFifo0Sv,
+    peakFifo1Sv,
+    peakFifo2Sv,
+    peakFifo3Sv,
+    speedKmH,
+    terrainKindSv,
+    terrainSbStateSv,
+    terrainSbPeakTimeSv,
+    terrainPhStateSv,
+    terrainPhPeakTimeSv,
+    terrainFlashStartSv,
+    terrainOverlayOpacitySv,
+    calStateSv,
+    calStartMsSv,
+    calSumX,
+    calSumY,
+    calSumZ,
+    calCount,
+    calProgressSv,
+  };
+}
+
+export type OscilloscopeSharedValues = ReturnType<typeof useOscilloscopeSharedValues>;
+</file>
+
+<file path="components/telemetry/oscilloscope/hooks/useOscilloscopeTelemetryEngine.ts">
+import { Accelerometer } from 'expo-sensors';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
+import type { LayoutChangeEvent } from 'react-native';
+import {
+  runOnJS,
+  useAnimatedReaction,
+  useDerivedValue,
+  useFrameCallback,
+  useSharedValue,
+  type SharedValue,
+} from 'react-native-reanimated';
+import { Skia, type SkPath } from '@shopify/react-native-skia';
+
+import {
+  BUFFER_LEN,
+  HUD_ANGLE_EMA,
+  PEAK_THRESHOLD_G,
+  PEAK_MA_SAMPLES,
+  PRECISION_CALIBRATION_MS,
+  SPEED_DISPLAY_ZERO_BELOW_KMH,
+} from '../constants';
+import {
+  SENSOR_INTERVAL_MS_TARGET,
+  TERRAIN_FLAT,
+  TERRAIN_PAIR_WINDOW_MS,
+  TERRAIN_POTHOLE,
+  TERRAIN_POTHOLE_NEG_G,
+  TERRAIN_POTHOLE_POS_G,
+  TERRAIN_SPEED_BUMP,
+  TERRAIN_SPEED_BUMP_NEG_G,
+  TERRAIN_SPEED_BUMP_POS_G,
+} from '../dspConstants';
+import { accelPitchRollDegAbsolute, displayWorldZG, hudTiltDisplayDeg } from '../sensorMath';
+import type { HudSnap } from '../types';
+import type { OscilloscopeSharedValues } from './useOscilloscopeSharedValues';
+
+function splineTraceFromBuffer(opts: {
+  buf: Float32Array;
+  wi: number;
+  delaySamples: number;
+  cw: number;
+  ch: number;
+  amp: number;
+  pxPerSample: number;
+}): SkPath {
+  'worklet';
+  const { buf, wi, delaySamples, amp, pxPerSample } = opts;
+  void opts.cw;
+  const midY = opts.ch * 0.52;
+  const delayed = delaySamples > 0;
+
+  const xs = new Float32Array(BUFFER_LEN);
+  const ys = new Float32Array(BUFFER_LEN);
+  let n = 0;
+
+  for (let i = 0; i < BUFFER_LEN; i++) {
+    let j: number;
+    if (wi < BUFFER_LEN) {
+      if (i >= wi) continue;
+      j = i;
+    } else {
+      j = (wi - BUFFER_LEN + i + BUFFER_LEN * 64) % BUFFER_LEN;
+    }
+    let jr = j;
+    if (delayed) {
+      jr = (j - delaySamples + BUFFER_LEN * 64) % BUFFER_LEN;
+    }
+    const v = buf[jr];
+    const vx = pxPerSample * i;
+    if (!Number.isFinite(v)) continue;
+    xs[n] = vx;
+    ys[n] = midY - v * amp;
+    n++;
+  }
+
+  const p = Skia.Path.Make();
+  if (n < 2) {
+    let started = false;
+    let gap = false;
+    for (let i = 0; i < BUFFER_LEN; i++) {
+      let jj: number;
+      if (wi < BUFFER_LEN) {
+        if (i >= wi) {
+          gap = true;
+          continue;
+        }
+        jj = i;
+      } else {
+        jj = (wi - BUFFER_LEN + i + BUFFER_LEN * 64) % BUFFER_LEN;
+      }
+      let jjr = jj;
+      if (delayed) {
+        jjr = (jj - delaySamples + BUFFER_LEN * 64) % BUFFER_LEN;
+      }
+      const ve = buf[jjr];
+      const vx = pxPerSample * i;
+      if (!Number.isFinite(ve)) {
+        gap = true;
+        continue;
+      }
+      const vy = midY - ve * amp;
+      if (!started || gap) {
+        p.moveTo(vx, vy);
+        started = true;
+        gap = false;
+      } else {
+        p.lineTo(vx, vy);
+      }
+    }
+    return p;
+  }
+
+  if (n === 2) {
+    p.moveTo(xs[0], ys[0]);
+    p.lineTo(xs[1], ys[1]);
+    return p;
+  }
+
+  const m0x = (xs[0] + xs[1]) * 0.5;
+  const m0y = (ys[0] + ys[1]) * 0.5;
+  p.moveTo(m0x, m0y);
+
+  for (let k = 1; k + 1 < n; k++) {
+    const ex = k + 1 < n - 1 ? (xs[k] + xs[k + 1]) * 0.5 : xs[n - 1];
+    const ey = k + 1 < n - 1 ? (ys[k] + ys[k + 1]) * 0.5 : ys[n - 1];
+    p.quadTo(xs[k], ys[k], ex, ey);
+  }
+
+  return p;
+}
+
+export function useAccelerometerStream(
+  rawAx: OscilloscopeSharedValues['rawAx'],
+  rawAy: OscilloscopeSharedValues['rawAy'],
+  rawAz: OscilloscopeSharedValues['rawAz']
+) {
+  useEffect(() => {
+    let alive = true;
+    Accelerometer.setUpdateInterval(SENSOR_INTERVAL_MS_TARGET);
+
+    const sa = Accelerometer.addListener(({ x, y, z }) => {
+      if (!alive) return;
+      rawAx.value = x;
+      rawAy.value = y;
+      rawAz.value = z;
+    });
+
+    return () => {
+      alive = false;
+      sa?.remove?.();
+    };
+  }, [rawAx, rawAy, rawAz]);
+}
+
+export function useChartSizeSync(
+  winW: number,
+  winH: number,
+  chartWsv: OscilloscopeSharedValues['chartWsv'],
+  chartHsv: OscilloscopeSharedValues['chartHsv']
+) {
+  useLayoutEffect(() => {
+    chartWsv.value = Math.max(winW, 120);
+    chartHsv.value = Math.max(winH * 0.52, 140);
+  }, [winW, winH, chartWsv, chartHsv]);
+}
+
+export function useOscilloscopeTelemetryEngine(
+  winW: number,
+  winH: number,
+  dashLocked: boolean,
+  setAdvancedSettingsOpen: Dispatch<SetStateAction<boolean>>,
+  sv: OscilloscopeSharedValues,
+  isHfLoggingSv: SharedValue<number>,
+  appendHfData: (z: number, pitch: number, roll: number, speed: number) => void,
+  onPrecisionCalibFinished?: () => void
+) {
+  const [hud, setHud] = useState<HudSnap>({
+    pitch: 0,
+    roll: 0,
+    peak: 0,
+    speed: 0,
+    zG: 0,
+    peakRollLeft: 0,
+    peakRollRight: 0,
+    peakVertZ: 0,
+  });
+
+  const {
+    chartWsv,
+    chartHsv,
+    rawAx,
+    rawAy,
+    rawAz,
+    gravUnitX,
+    gravUnitY,
+    gravUnitZ,
+    cleanVertZSv,
+    hasCalibSv,
+    vertFastAlphaSv,
+    sensitivityMultiplierSv,
+    writeIdxSv,
+    waveData,
+    sampleTick,
+    pitchFusDegSv,
+    rollFusDegSv,
+    pitchCalBiasDegSv,
+    rollCalBiasDegSv,
+    dspPitchDeg,
+    dspRollDeg,
+    dspPeakG,
+    dspPeakRollLeftDeg,
+    dspPeakRollRightDeg,
+    dspPeakVertZSv,
+    hudDisplayZSv,
+    peakFifo0Sv,
+    peakFifo1Sv,
+    peakFifo2Sv,
+    peakFifo3Sv,
+    speedKmH,
+    terrainKindSv,
+    terrainSbStateSv,
+    terrainSbPeakTimeSv,
+    terrainPhStateSv,
+    terrainPhPeakTimeSv,
+    terrainFlashStartSv,
+    terrainOverlayOpacitySv,
+    calStateSv,
+    calStartMsSv,
+    calSumX,
+    calSumY,
+    calSumZ,
+    calCount,
+    calProgressSv,
+  } = sv;
+
+  useAccelerometerStream(rawAx, rawAy, rawAz);
+  useChartSizeSync(winW, winH, chartWsv, chartHsv);
+
+  useEffect(() => {
+    if (dashLocked) {
+      setAdvancedSettingsOpen(false);
+    }
+  }, [dashLocked, setAdvancedSettingsOpen]);
+
+  const onChartLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      const { width, height } = e.nativeEvent.layout;
+      chartWsv.value = width;
+      chartHsv.value = height;
+    },
+    [chartWsv, chartHsv]
+  );
+
+  const notifyPrecisionCalibFinished = useCallback(() => {
+    onPrecisionCalibFinished?.();
+  }, [onPrecisionCalibFinished]);
+
+  /**
+   * UI-thread pipeline: gravity-linear Z → preset-tunable EMA on `cleanVertZSv`.
+   * Terrain bumps/potholes and chart buffer track the same smoothed Δg signal.
+   */
+  useAnimatedReaction(
+    () => ({
+      ax: rawAx.value,
+      ay: rawAy.value,
+      az: rawAz.value,
+      gux: gravUnitX.value,
+      guy: gravUnitY.value,
+      guz: gravUnitZ.value,
+      hasCalib: hasCalibSv.value,
+      vertFastAlpha: vertFastAlphaSv.value,
+      calState: calStateSv.value,
+      calStartMs: calStartMsSv.value,
+    }),
+    (cur) => {
+      'worklet';
+      const now = Date.now();
+
+      const bx = cur.ax;
+      const by = cur.ay;
+      const bz = cur.az;
+
+      if (cur.calState === 1) {
+        const elapsed = now - cur.calStartMs;
+
+        if (elapsed < PRECISION_CALIBRATION_MS) {
+          calSumX.value += bx;
+          calSumY.value += by;
+          calSumZ.value += bz;
+          calCount.value += 1;
+          calProgressSv.value = elapsed / PRECISION_CALIBRATION_MS;
+          return;
+        }
+
+        const count = Math.max(1, calCount.value);
+        const avgX = calSumX.value / count;
+        const avgY = calSumY.value / count;
+        const avgZ = calSumZ.value / count;
+
+        const mn = Math.sqrt(avgX * avgX + avgY * avgY + avgZ * avgZ);
+        if (mn > 1e-6) {
+          gravUnitX.value = avgX / mn;
+          gravUnitY.value = avgY / mn;
+          gravUnitZ.value = avgZ / mn;
+        }
+
+        const { pitchDeg: pCal, rollDeg: rCal } = accelPitchRollDegAbsolute(avgX, avgY, avgZ);
+        pitchCalBiasDegSv.value = pCal;
+        rollCalBiasDegSv.value = rCal;
+        pitchFusDegSv.value = pCal;
+        rollFusDegSv.value = rCal;
+
+        cleanVertZSv.value = 0;
+        terrainKindSv.value = TERRAIN_FLAT;
+        terrainSbStateSv.value = 0;
+        terrainSbPeakTimeSv.value = 0;
+        terrainPhStateSv.value = 0;
+        terrainPhPeakTimeSv.value = 0;
+        terrainFlashStartSv.value = 0;
+        terrainOverlayOpacitySv.value = 0;
+
+        dspPeakG.value = 0;
+        peakFifo0Sv.value = 0;
+        peakFifo1Sv.value = 0;
+        peakFifo2Sv.value = 0;
+        peakFifo3Sv.value = 0;
+        dspPeakRollLeftDeg.value = 0;
+        dspPeakRollRightDeg.value = 0;
+        dspPeakVertZSv.value = 0;
+        dspPitchDeg.value = 0;
+        dspRollDeg.value = 0;
+
+        const waveBuf = waveData.value;
+        waveBuf.fill(0);
+        waveData.value = waveBuf;
+        writeIdxSv.value = 0;
+        sampleTick.value = 0;
+        hudDisplayZSv.value = displayWorldZG(cleanVertZSv.value);
+
+        calStateSv.value = 0;
+        hasCalibSv.value = 1;
+        calProgressSv.value = 1;
+
+        runOnJS(notifyPrecisionCalibFinished)();
+        return;
+      }
+
+      const z_total = bx * cur.gux + by * cur.guy + bz * cur.guz;
+      const vert_z_raw = z_total - 1.0;
+
+      if (cur.hasCalib === 1) {
+        const alpha = cur.vertFastAlpha;
+        cleanVertZSv.value = alpha * vert_z_raw + (1 - alpha) * cleanVertZSv.value;
+
+        const zt = cleanVertZSv.value;
+        const win = TERRAIN_PAIR_WINDOW_MS;
+
+        if (terrainSbStateSv.value === 0 && zt > TERRAIN_SPEED_BUMP_POS_G) {
+          terrainSbStateSv.value = 1;
+          terrainSbPeakTimeSv.value = now;
+        } else if (terrainSbStateSv.value === 1) {
+          const t0 = terrainSbPeakTimeSv.value;
+          if (zt < TERRAIN_SPEED_BUMP_NEG_G && now - t0 <= win) {
+            terrainKindSv.value = TERRAIN_SPEED_BUMP;
+            terrainFlashStartSv.value = now;
+            terrainOverlayOpacitySv.value = 1;
+            terrainSbStateSv.value = 0;
+          } else if (now - t0 > win) {
+            terrainSbStateSv.value = 0;
+          }
+        }
+
+        if (terrainPhStateSv.value === 0 && zt < TERRAIN_POTHOLE_NEG_G) {
+          terrainPhStateSv.value = 1;
+          terrainPhPeakTimeSv.value = now;
+        } else if (terrainPhStateSv.value === 1) {
+          const t0 = terrainPhPeakTimeSv.value;
+          if (zt > TERRAIN_POTHOLE_POS_G && now - t0 <= win) {
+            terrainKindSv.value = TERRAIN_POTHOLE;
+            terrainFlashStartSv.value = now;
+            terrainOverlayOpacitySv.value = 1;
+            terrainPhStateSv.value = 0;
+          } else if (now - t0 > win) {
+            terrainPhStateSv.value = 0;
+          }
+        }
+      } else {
+        cleanVertZSv.value = 0;
+        terrainSbStateSv.value = 0;
+        terrainPhStateSv.value = 0;
+        terrainKindSv.value = TERRAIN_FLAT;
+      }
+
+      const chartSample = cleanVertZSv.value;
+
+      peakFifo3Sv.value = peakFifo2Sv.value;
+      peakFifo2Sv.value = peakFifo1Sv.value;
+      peakFifo1Sv.value = peakFifo0Sv.value;
+      peakFifo0Sv.value = vert_z_raw;
+      const maZ =
+        (peakFifo0Sv.value +
+          peakFifo1Sv.value +
+          peakFifo2Sv.value +
+          peakFifo3Sv.value) /
+        PEAK_MA_SAMPLES;
+
+      if (Math.abs(maZ) > Math.abs(dspPeakG.value) && Math.abs(maZ) > PEAK_THRESHOLD_G) {
+        dspPeakG.value = Math.abs(maZ);
+      }
+
+      if (cur.hasCalib === 1) {
+        const { pitchDeg: aPitch, rollDeg: aRoll } = accelPitchRollDegAbsolute(bx, by, bz);
+        pitchFusDegSv.value = HUD_ANGLE_EMA * aPitch + (1 - HUD_ANGLE_EMA) * pitchFusDegSv.value;
+        rollFusDegSv.value = HUD_ANGLE_EMA * aRoll + (1 - HUD_ANGLE_EMA) * rollFusDegSv.value;
+
+        const pitchRel = pitchFusDegSv.value - pitchCalBiasDegSv.value;
+        const rollRel = rollFusDegSv.value - rollCalBiasDegSv.value;
+        dspPitchDeg.value = HUD_ANGLE_EMA * pitchRel + (1 - HUD_ANGLE_EMA) * dspPitchDeg.value;
+        dspRollDeg.value = HUD_ANGLE_EMA * rollRel + (1 - HUD_ANGLE_EMA) * dspRollDeg.value;
+
+        const rDeg = dspRollDeg.value;
+        if (rDeg < 0) {
+          const magL = -rDeg;
+          if (magL > dspPeakRollLeftDeg.value) dspPeakRollLeftDeg.value = magL;
+        } else if (rDeg > 0) {
+          if (rDeg > dspPeakRollRightDeg.value) dspPeakRollRightDeg.value = rDeg;
+        }
+
+        if (
+          Math.abs(chartSample) > dspPeakVertZSv.value &&
+          Math.abs(chartSample) > PEAK_THRESHOLD_G
+        ) {
+          dspPeakVertZSv.value = Math.abs(chartSample);
+        }
+      } else {
+        dspPitchDeg.value = 0;
+        dspRollDeg.value = 0;
+        pitchFusDegSv.value = 0;
+        rollFusDegSv.value = 0;
+      }
+
+      const buf = waveData.value;
+      const idx = writeIdxSv.value % BUFFER_LEN;
+      buf[idx] = chartSample;
+      writeIdxSv.value += 1;
+      waveData.value = buf;
+
+      hudDisplayZSv.value = displayWorldZG(cleanVertZSv.value);
+      sampleTick.value += 1;
+
+      if (isHfLoggingSv.value === 1) {
+        runOnJS(appendHfData)(cleanVertZSv.value, dspPitchDeg.value, dspRollDeg.value, speedKmH.value);
+      }
+    },
+    [notifyPrecisionCalibFinished]
+  );
+
+  const vertZHudDerived = useDerivedValue(() => displayWorldZG(cleanVertZSv.value));
+
+  const hudFrame = useSharedValue(0);
+
+  const pushHud = useCallback((snap: HudSnap) => {
+    setHud(snap);
+  }, []);
+
+  /* eslint-disable react-hooks/exhaustive-deps */
+  const hudFrameWorklet = useMemo(() => () => {
+    'worklet';
+    hudFrame.value += 1;
+    if (hudFrame.value % 12 !== 0) {
+      return;
+    }
+    const vKmh = speedKmH.value;
+    runOnJS(pushHud)({
+      pitch: hudTiltDisplayDeg(dspPitchDeg.value),
+      roll: hudTiltDisplayDeg(dspRollDeg.value),
+      peak: dspPeakG.value,
+      speed: vKmh < SPEED_DISPLAY_ZERO_BELOW_KMH ? 0 : vKmh,
+      zG: vertZHudDerived.value,
+      peakRollLeft: dspPeakRollLeftDeg.value,
+      peakRollRight: dspPeakRollRightDeg.value,
+      peakVertZ: dspPeakVertZSv.value,
+    });
+  }, [pushHud, vertZHudDerived]);
+  /* eslint-enable react-hooks/exhaustive-deps */
+
+  useFrameCallback(hudFrameWorklet);
+
+  const terrainOverlayFrame = useMemo(() => {
+    const tick = () => {
+      'worklet';
+      const start = terrainFlashStartSv.value;
+      if (start <= 0) {
+        terrainOverlayOpacitySv.value = 0;
+        return;
+      }
+      const elapsed = Date.now() - start;
+      if (elapsed >= 2000) {
+        terrainOverlayOpacitySv.value = 0;
+        terrainFlashStartSv.value = 0;
+        terrainKindSv.value = TERRAIN_FLAT;
+        return;
+      }
+      terrainOverlayOpacitySv.value = Math.max(0, 1 - elapsed / 2000);
+    };
+    return tick;
+  }, []);
+
+  useFrameCallback(terrainOverlayFrame);
+
+  const chartRedrawSv = useSharedValue(0);
+  const chartRedrawFrame = useMemo(() => () => {
+    'worklet';
+    chartRedrawSv.value = (chartRedrawSv.value + 1) % 1e9;
+  }, []);
+  useFrameCallback(chartRedrawFrame);
+
+  const gridPath = useDerivedValue(() => {
+    'worklet';
+    void sampleTick.value;
+    const w = chartWsv.value;
+    const h = chartHsv.value;
+    const p = Skia.Path.Make();
+    const nx = 10;
+    const ny = 14;
+    for (let ix = 0; ix <= nx; ix++) {
+      const x = (ix / nx) * w;
+      p.moveTo(x, 0);
+      p.lineTo(x, h);
+    }
+    for (let iy = 0; iy <= ny; iy++) {
+      const y = (iy / ny) * h;
+      p.moveTo(0, y);
+      p.lineTo(w, y);
+    }
+    return p;
+  });
+
+  const baselinePath = useDerivedValue(() => {
+    'worklet';
+    void sampleTick.value;
+    const ch = chartHsv.value;
+    const cw = chartWsv.value;
+    const midY = ch * 0.52;
+    const path = Skia.Path.Make();
+    path.moveTo(0, midY);
+    path.lineTo(cw, midY);
+    return path;
+  });
+
+  const oscilloscopePath = useDerivedValue(() => {
+    'worklet';
+    void chartRedrawSv.value;
+    void sampleTick.value;
+    const cw = chartWsv.value;
+    const ch = chartHsv.value;
+    void sensitivityMultiplierSv.value;
+    const pxPerSample = BUFFER_LEN > 1 ? cw / (BUFFER_LEN - 1) : cw;
+    const amp = ch * 0.42 * 1.05 * sensitivityMultiplierSv.value;
+    return splineTraceFromBuffer({
+      buf: waveData.value,
+      wi: writeIdxSv.value,
+      delaySamples: 0,
+      cw,
+      ch,
+      amp,
+      pxPerSample,
+    });
+  });
+
+  return {
+    hud,
+    onChartLayout,
+    gridPath,
+    baselinePath,
+    oscilloscopePath,
+    terrainKindSv,
+    terrainOverlayOpacitySv,
+  };
+}
+</file>
+
+<file path="components/telemetry/oscilloscope/styles.ts">
+import { StyleSheet } from 'react-native';
+
+export const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    flexDirection: 'column',
+    backgroundColor: '#000',
+  },
+  chartWrap: {
+    flex: 1,
+    minHeight: 200,
+    position: 'relative',
+  },
+  canvas: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  bottomPanel: {
+    flexShrink: 1,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#243028',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    gap: 14,
+    backgroundColor: '#000',
+  },
+  hudTopBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 2,
+  },
+  presetSwitchRow: {
+    alignItems: 'stretch',
+    marginBottom: 4,
+  },
+  presetSegmentTrack: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#324038',
+    overflow: 'hidden',
+    backgroundColor: '#060a08',
+  },
+  presetSegmentTrackLocked: {
+    opacity: 0.42,
+  },
+  presetSegmentBtn: {
+    flex: 1,
+    paddingVertical: 9,
+    paddingHorizontal: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#080d0a',
+  },
+  presetSegmentLeft: {},
+  presetSegmentRight: {},
+  presetSegmentBtnActive: {
+    backgroundColor: '#102218',
+    borderColor: '#2cff8a',
+  },
+  presetSegmentBtnPressed: {
+    opacity: 0.88,
+  },
+  presetSegmentBtnDisabled: {
+    opacity: 1,
+  },
+  presetSegmentDivider: {
+    width: StyleSheet.hairlineWidth,
+    backgroundColor: '#2a3330',
+    alignSelf: 'stretch',
+  },
+  presetSegmentLbl: {
+    color: '#7a9286',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.8,
+  },
+  presetSegmentLblActive: {
+    color: '#bfffe0',
+  },
+  presetDashboardBadge: {
+    marginTop: 4,
+    color: '#6b9e82',
+    fontSize: 9,
+    letterSpacing: 0.8,
+  },
+  hudMetricsPanel: {
+    gap: 14,
+  },
+  hudSection: {
+    gap: 10,
+  },
+  hudSectionLabel: {
+    color: '#5a7d68',
+    fontSize: 10,
+    letterSpacing: 2.4,
+    textTransform: 'uppercase',
+    opacity: 0.92,
+  },
+  hudMetricRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 10,
+  },
+  performanceHint: {
+    color: '#5f7d6c',
+    fontSize: 10,
+    lineHeight: 15,
+    letterSpacing: 0.35,
+  },
+  performanceCard: {
+    borderRadius: 11,
+    backgroundColor: '#080e0c',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#284536',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    gap: 8,
+    shadowColor: '#102218',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.55,
+    shadowRadius: 5,
+    elevation: 4,
+  },
+  performanceCardTitle: {
+    color: '#6d9e82',
+    fontSize: 9,
+    fontWeight: '700',
+    letterSpacing: 2.2,
+  },
+  performanceCardMetric: {
+    color: '#c4f5dc',
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.2,
+    lineHeight: 20,
+  },
+  performanceAnalyzerTitle: {
+    color: '#5cff9b',
+    fontSize: 17,
+    fontWeight: '700',
+    letterSpacing: 1.6,
+    marginBottom: 8,
+  },
+  performanceCalibrationFlash: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#2cff8a',
+  },
+  performanceBullet: {
+    color: '#86a898',
+    fontSize: 12,
+    lineHeight: 18,
+    marginBottom: 6,
+  },
+  bumpDiagCard: {
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 11,
+    backgroundColor: '#060a08',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#243028',
+    gap: 10,
+    shadowColor: '#102218',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.85,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  bumpDiagPlaceholder: {
+    color: '#5f7d6c',
+    fontSize: 11,
+    lineHeight: 16,
+    letterSpacing: 0.4,
+  },
+  bumpAdviceRowDual: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    alignItems: 'stretch',
+  },
+  bumpAxisCardHalf: {
+    flexGrow: 1,
+    flexBasis: '45%',
+    minWidth: 140,
+    maxWidth: '100%',
+  },
+  axisBumpCardTitle: {
+    color: '#7ab896',
+    fontSize: 10,
+    letterSpacing: 2,
+    textTransform: 'uppercase',
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  pitchBiasBadge: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: '#0f1412',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#355649',
+    marginBottom: 2,
+  },
+  pitchBiasBadgeText: {
+    color: '#b8dfc8',
+    fontSize: 11,
+    lineHeight: 15,
+    fontStyle: 'italic',
+    opacity: 0.95,
+  },
+  bumpDiagHeadRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  bumpStatusChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  bumpStatusChipTxt: {
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1.4,
+  },
+  bumpPeakInline: {
+    color: '#c4f5dc',
+    fontSize: 14,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+  bumpAdviceLine: {
+    color: '#a8d4bf',
+    fontSize: 12,
+    lineHeight: 17,
+    letterSpacing: 0.2,
+  },
+  bumpAdviceLbl: {
+    color: '#6d8c7a',
+    fontWeight: '600',
+  },
+  bumpDiagMeta: {
+    color: '#5f7d6c',
+    fontSize: 10,
+    letterSpacing: 0.6,
+    marginTop: 2,
+    fontVariant: ['tabular-nums'],
+  },
+  metricTile: {
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 0,
+    minWidth: 74,
+    paddingVertical: 11,
+    paddingHorizontal: 10,
+    borderRadius: 11,
+    backgroundColor: '#060a08',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#1c2f24',
+    shadowColor: '#102218',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.9,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  metricTileLabel: {
+    fontSize: 9,
+    letterSpacing: 0.8,
+    color: '#6d8c7a',
+    marginBottom: 6,
+    lineHeight: 12,
+  },
+  metricTileVal: {
+    fontSize: 17,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+    letterSpacing: 0.2,
+  },
+  metricTileSuf: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#5f7d6c',
+    opacity: 0.85,
+  },
+  dashboardTools: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    flexShrink: 0,
+  },
+  toolBtn: {
+    padding: 6,
+    borderRadius: 6,
+  },
+  toolBtnPressed: {
+    opacity: 0.75,
+  },
+  toolBtnDisabled: {
+    opacity: 0.35,
+  },
+  settingsDrawerRoot: {
+    flex: 1,
+  },
+  settingsDrawerBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#000',
+  },
+  settingsDrawerBackdropPress: {
+    flex: 1,
+  },
+  settingsDrawerPanelWrap: {
+    position: 'absolute',
+  },
+  settingsDrawerPanel: {
+    flex: 1,
+    backgroundColor: '#060a08',
+    borderTopRightRadius: 14,
+    borderBottomRightRadius: 14,
+    overflow: 'hidden',
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: '#324038',
+    shadowColor: '#000',
+    shadowOffset: { width: 8, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 22,
+    elevation: 28,
+  },
+  settingsDrawerEdgeLine: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: 2,
+    backgroundColor: 'rgba(44, 255, 138, 0.06)',
+  },
+  settingsDrawerHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#1e2a23',
+  },
+  settingsDrawerTitleBlock: {
+    flex: 1,
+    gap: 4,
+    paddingRight: 4,
+  },
+  settingsDrawerTitle: {
+    color: '#7ab896',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 2.2,
+  },
+  settingsDrawerSubtitle: {
+    color: '#5e6d66',
+    fontSize: 9,
+    letterSpacing: 0.85,
+    lineHeight: 14,
+  },
+  settingsDrawerCloseBtn: {
+    marginTop: -2,
+    padding: 6,
+    borderRadius: 8,
+  },
+  settingsDrawerCloseBtnPressed: {
+    opacity: 0.72,
+    backgroundColor: '#0f1814',
+  },
+  settingsDrawerBody: {
+    flex: 1,
+    minHeight: 200,
+    paddingHorizontal: 12,
+    paddingTop: 10,
+  },
+  logoCluster: {
+    justifyContent: 'flex-start',
+  },
+  calRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    paddingVertical: 12,
+  },
+  resetMaxBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#3a5548',
+    backgroundColor: '#0a1410',
+  },
+  resetMaxBtnDisabled: {
+    opacity: 0.35,
+  },
+  resetMaxBtnPressed: {
+    opacity: 0.88,
+  },
+  resetMaxLabel: {
+    color: '#8a9e94',
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 1.2,
+  },
+  logo: {
+    color: '#5cff9b',
+    fontSize: 15,
+    letterSpacing: 2,
+    fontWeight: '700',
+    marginBottom: -2,
+  },
+  logoSub: {
+    color: '#5a6b63',
+    fontSize: 8,
+    letterSpacing: 1.4,
+    marginBottom: 2,
+  },
+  calBtn: {
+    paddingHorizontal: 28,
+    paddingVertical: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#2cff8a',
+    overflow: 'visible',
+  },
+  calBtnDisabled: {
+    opacity: 0.35,
+  },
+  calBanner: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    zIndex: 4,
+  },
+  calBannerText: {
+    color: '#9effc5',
+    fontSize: 13,
+    letterSpacing: 1,
+    textAlign: 'center',
+    paddingHorizontal: 12,
+  },
+  calPrecOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 8, 4, 0.82)',
+    zIndex: 6,
+    paddingHorizontal: 18,
+    gap: 18,
+  },
+  calPrecTitle: {
+    color: '#5cff9b',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 2,
+    textAlign: 'center',
+  },
+  calPrecTrack: {
+    width: '88%',
+    maxWidth: 460,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: 'rgba(44, 255, 138, 0.1)',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(44, 255, 138, 0.38)',
+  },
+  calModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.84)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+  },
+  calModalCard: {
+    width: '100%',
+    maxWidth: 400,
+    paddingVertical: 32,
+    paddingHorizontal: 22,
+    borderRadius: 14,
+    backgroundColor: '#0a1210',
+    borderWidth: 1,
+    borderColor: '#2cff8a',
+    gap: 22,
+    alignItems: 'center',
+  },
+  calModalProgressTrack: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(44, 255, 138, 0.12)',
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(44, 255, 138, 0.4)',
+    alignSelf: 'center',
+  },
+  calBtnPressed: {
+    opacity: 0.88,
+  },
+  calGlow: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 32,
+    shadowColor: '#2cff8a',
+    shadowOpacity: 0.8,
+    shadowRadius: 2,
+    shadowOffset: { width: 0, height: -4 },
+    elevation: 15,
+  },
+  calLabel: {
+    color: '#6cffb0',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 2,
+  },
+  terrainIcon: {
+    fontSize: 28,
+    textShadowColor: 'rgba(0,0,0,0.85)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  hfTelemetryRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    gap: 10,
+    paddingBottom: 8,
+  },
+  hfJsonRecBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderRadius: 8,
+    backgroundColor: '#14080a',
+    borderWidth: 1.5,
+    borderColor: '#aa4460',
+    minWidth: 100,
+    alignItems: 'center',
+  },
+  hfJsonRecBtnOn: {
+    backgroundColor: '#2a0610',
+    borderColor: '#ff2150',
+  },
+  hfJsonRecBtnDisabled: {
+    opacity: 0.35,
+  },
+  hfJsonRecBtnPressed: {
+    opacity: 0.88,
+  },
+  hfJsonRecLabel: {
+    color: '#ff9aad',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+  },
+  hfJsonExportBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 14,
+    borderRadius: 8,
+    backgroundColor: '#0a1210',
+    borderWidth: 1,
+    borderColor: '#5a8cff',
+    minWidth: 100,
+    alignItems: 'center',
+  },
+  hfJsonExportBtnDisabled: {
+    opacity: 0.35,
+  },
+  hfJsonExportBtnPressed: {
+    opacity: 0.88,
+  },
+  hfJsonExportLabel: {
+    color: '#9ec5ff',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
+  ecuScreenTitle: {
+    color: '#5cff9b',
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 2.4,
+  },
+  ecuConnectBtn: {
+    paddingHorizontal: 18,
+    paddingVertical: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#2cff8a',
+    overflow: 'visible',
+    backgroundColor: '#060c09',
+  },
+  ecuConnectBtnScanning: {
+    borderColor: '#48eaff',
+    shadowColor: '#48eaff',
+    shadowOpacity: 0.55,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 12,
+  },
+  ecuConnectBtnConnected: {
+    borderColor: '#5cff9b',
+    backgroundColor: '#0a1810',
+    shadowColor: '#2cff8a',
+    shadowOpacity: 0.65,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 14,
+  },
+  ecuConnectGlow: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 8,
+    shadowColor: '#2cff8a',
+    shadowOpacity: 0.75,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: -2 },
+    elevation: 10,
+  },
+  ecuConnectLabel: {
+    color: '#6cffb0',
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1.6,
+  },
+  ecuConnectLabelScanning: {
+    color: '#8ae8ff',
+  },
+  ecuConnectLabelConnected: {
+    color: '#9effc5',
+  },
+  ecuInfoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 4,
+  },
+  ecuInfoKey: {
+    color: '#6d8c7a',
+    fontSize: 10,
+    letterSpacing: 1.2,
+    fontWeight: '600',
+  },
+  ecuInfoVal: {
+    color: '#c4f5dc',
+    fontSize: 11,
+    fontWeight: '600',
+    flexShrink: 1,
+    textAlign: 'right',
+    fontVariant: ['tabular-nums'],
+  },
+});
+</file>
+
+<file path="components/telemetry/useSuspensionBumpFsm.ts">
+import { useCallback, useMemo, useRef } from 'react';
+import { runOnJS, runOnUI, useFrameCallback, useSharedValue } from 'react-native-reanimated';
+import type { FrameInfo, SharedValue } from 'react-native-reanimated';
+
+import { WHEELBASE_M } from './oscilloscope/dspConstants';
+
+const FSM_IDLE = 0;
+const FSM_IMPACT = 1;
+const FSM_SETTLING = 2;
+
+const SETTLING_ABORT_MS = 12000;
+
+export type SuspensionSurfaceStatus =
+  | 'HARSH_IMPACT'
+  | 'UNDERDAMPED'
+  | 'OVERDAMPED'
+  | 'GOOD';
+
+export type SuspensionBumpDiagResult = {
+  maxPeakZG: number;
+  bounceCount: number;
+  impactStartMs: number;
+  settlingDurationMs: number;
+  compressionAdvice: string;
+  reboundAdvice: string;
+  surfaceStatus: SuspensionSurfaceStatus;
+  pitchBiasNote: string;
+};
+
+function evaluateDiagnostics(
+  maxPeakZG: number,
+  bounceCount: number,
+  settlingDurationMs: number,
+  harshPeakG: number,
+  overdampedSettlingMs: number
+): Pick<SuspensionBumpDiagResult, 'compressionAdvice' | 'reboundAdvice' | 'surfaceStatus'> {
+  'worklet';
+  let compressionAdvice: string;
+  if (maxPeakZG > harshPeakG) {
+    compressionAdvice = 'HARSH: Reduce Comp. Damping (Turn Softer / -)';
+  } else {
+    compressionAdvice = 'COMPRESSION: Good absorption';
+  }
+
+  let reboundAdvice: string;
+  if (bounceCount >= 2) {
+    reboundAdvice = 'BOUNCY (Too Fast): Add Rebound Damping (Turn Stiffer / +)';
+  } else if (settlingDurationMs > overdampedSettlingMs && bounceCount <= 1) {
+    reboundAdvice = 'PACKING (Too Slow): Reduce Rebound Damping (Turn Softer / -)';
+  } else {
+    reboundAdvice = 'REBOUND: Stable & Ideal';
+  }
+
+  let surfaceStatus: SuspensionSurfaceStatus;
+  if (maxPeakZG > harshPeakG) {
+    surfaceStatus = 'HARSH_IMPACT';
+  } else if (bounceCount >= 2) {
+    surfaceStatus = 'UNDERDAMPED';
+  } else if (settlingDurationMs > overdampedSettlingMs && bounceCount <= 1) {
+    surfaceStatus = 'OVERDAMPED';
+  } else {
+    surfaceStatus = 'GOOD';
+  }
+
+  return { compressionAdvice, reboundAdvice, surfaceStatus };
+}
+
+function pitchBiasNoteFromDeg(deg: number): string {
+  'worklet';
+  if (deg < -2.0) {
+    return `BRAKING: Front loaded (${deg.toFixed(1)}°). Expect harsher impact.`;
+  }
+  if (deg > 2.0) {
+    return `ACCELERATING: Rear loaded (${deg.toFixed(1)}°).`;
+  }
+  return 'COASTING: Neutral balance.';
+}
+
+function rearHitDelayMsSpeed(speedKmH: number): number {
+  'worklet';
+  const cms = Math.max(speedKmH / 3.6, 0.001);
+  return (WHEELBASE_M / cms) * 1000;
+}
+
+export type UseSuspensionBumpFsmParams = {
+  vertZ: SharedValue<number>;
+  hasCalib: SharedValue<number>;
+  pitchDeg: SharedValue<number>;
+  onDiagnosticsReady: (frontDiag: SuspensionBumpDiagResult, rearDiag: SuspensionBumpDiagResult | null) => void;
+  bumpThresholdG: SharedValue<number>;
+  stableZoneG: SharedValue<number>;
+  stableHoldMs: SharedValue<number>;
+  harshPeakG: SharedValue<number>;
+  overdampedSettlingMs: SharedValue<number>;
+  zeroCrossEpsG: SharedValue<number>;
+  speedKmH: SharedValue<number>;
+};
+
+export function useSuspensionBumpFsm({
+  vertZ,
+  hasCalib,
+  pitchDeg,
+  onDiagnosticsReady,
+  bumpThresholdG,
+  stableZoneG,
+  stableHoldMs,
+  harshPeakG,
+  overdampedSettlingMs,
+  zeroCrossEpsG,
+  speedKmH,
+}: UseSuspensionBumpFsmParams): { resetBumpFsm: () => void } {
+  const cbRef = useRef(onDiagnosticsReady);
+  cbRef.current = onDiagnosticsReady;
+  const lastFrontDiagRef = useRef<SuspensionBumpDiagResult | null>(null);
+
+  const emitFrontDoneJS = useCallback((r: SuspensionBumpDiagResult) => {
+    lastFrontDiagRef.current = r;
+    cbRef.current(r, null);
+  }, []);
+
+  const emitRearWithStoredFrontJS = useCallback((rear: SuspensionBumpDiagResult) => {
+    const f = lastFrontDiagRef.current;
+    if (f) {
+      cbRef.current(f, rear);
+    }
+  }, []);
+
+  const fStateSv = useSharedValue(FSM_IDLE);
+  const fMaxPeakSv = useSharedValue(0);
+  const fBouncesSv = useSharedValue(0);
+  const fImpactMsSv = useSharedValue(0);
+  const fSettlingStartSv = useSharedValue(0);
+  const fPrevZSv = useSharedValue(0);
+  const fStableAccumSv = useSharedValue(0);
+  const fPitchAtImpactSv = useSharedValue(0);
+
+  const rearKickAtMsSv = useSharedValue(0);
+
+  const rStateSv = useSharedValue(FSM_IDLE);
+  const rMaxPeakSv = useSharedValue(0);
+  const rBouncesSv = useSharedValue(0);
+  const rImpactMsSv = useSharedValue(0);
+  const rSettlingStartSv = useSharedValue(0);
+  const rPrevZSv = useSharedValue(0);
+  const rStableAccumSv = useSharedValue(0);
+
+  const bumpWorklet = useMemo(() => {
+    const w = (_frame: FrameInfo) => {
+      'worklet';
+      if (hasCalib.value !== 1) {
+        return;
+      }
+
+      const bumpTh = bumpThresholdG.value;
+      const stableZ = stableZoneG.value;
+      const holdMs = stableHoldMs.value;
+      const harshG = harshPeakG.value;
+      const overMs = overdampedSettlingMs.value;
+      const zxEps = zeroCrossEpsG.value;
+
+      const z = vertZ.value;
+      const wallMs = Date.now();
+      const dt = _frame.timeSincePreviousFrame;
+      const deltaMs = dt != null && dt > 0 && dt < 200 ? dt : 1000 / 60;
+      const absZ = Math.abs(z);
+
+      const fs0 = fStateSv.value;
+      if (fs0 === FSM_IDLE) {
+        if (absZ > bumpTh) {
+          fStateSv.value = FSM_IMPACT;
+          fImpactMsSv.value = wallMs;
+          fPitchAtImpactSv.value = pitchDeg.value;
+          fMaxPeakSv.value = absZ;
+          fStableAccumSv.value = 0;
+          if (rStateSv.value === FSM_IDLE) {
+            rearKickAtMsSv.value = wallMs + rearHitDelayMsSpeed(speedKmH.value);
+          } else {
+            rearKickAtMsSv.value = 0;
+          }
+        }
+      } else if (fs0 === FSM_IMPACT) {
+        if (absZ > fMaxPeakSv.value) {
+          fMaxPeakSv.value = absZ;
+        }
+        if (absZ < bumpTh) {
+          fStateSv.value = FSM_SETTLING;
+          fSettlingStartSv.value = wallMs;
+          fBouncesSv.value = 0;
+          fPrevZSv.value = z;
+          fStableAccumSv.value = 0;
+        }
+      } else {
+        const prevZf = fPrevZSv.value;
+        if (Math.abs(prevZf) > zxEps * 0.5 && Math.abs(z) > zxEps * 0.5 && prevZf * z < 0) {
+          fBouncesSv.value += 1;
+        }
+        fPrevZSv.value = z;
+
+        if (absZ <= stableZ) {
+          fStableAccumSv.value += deltaMs;
+        } else {
+          fStableAccumSv.value = 0;
+        }
+
+        const fSettlingStart = fSettlingStartSv.value;
+        if (wallMs - fSettlingStart > SETTLING_ABORT_MS) {
+          fStateSv.value = FSM_IDLE;
+          fMaxPeakSv.value = 0;
+          fBouncesSv.value = 0;
+          fStableAccumSv.value = 0;
+        } else if (fStableAccumSv.value >= holdMs) {
+          const settlingDurationMs = wallMs - fSettlingStart;
+          const peak = fMaxPeakSv.value;
+          const bounces = fBouncesSv.value;
+          const impactStart = fImpactMsSv.value;
+          const pitchN = pitchBiasNoteFromDeg(fPitchAtImpactSv.value);
+          const diagBase = evaluateDiagnostics(peak, bounces, settlingDurationMs, harshG, overMs);
+
+          runOnJS(emitFrontDoneJS)({
+            maxPeakZG: peak,
+            bounceCount: bounces,
+            impactStartMs: impactStart,
+            settlingDurationMs,
+            compressionAdvice: diagBase.compressionAdvice,
+            reboundAdvice: diagBase.reboundAdvice,
+            surfaceStatus: diagBase.surfaceStatus,
+            pitchBiasNote: pitchN,
+          });
+
+          fStateSv.value = FSM_IDLE;
+          fMaxPeakSv.value = 0;
+          fBouncesSv.value = 0;
+          fStableAccumSv.value = 0;
+        }
+      }
+
+      if (rStateSv.value === FSM_IDLE && rearKickAtMsSv.value > 0 && wallMs >= rearKickAtMsSv.value) {
+        rStateSv.value = FSM_IMPACT;
+        rearKickAtMsSv.value = 0;
+        rImpactMsSv.value = wallMs;
+        rMaxPeakSv.value = absZ;
+        rStableAccumSv.value = 0;
+      }
+
+      const rs = rStateSv.value;
+      if (rs === FSM_IMPACT) {
+        if (absZ > rMaxPeakSv.value) {
+          rMaxPeakSv.value = absZ;
+        }
+        if (absZ < bumpTh) {
+          rStateSv.value = FSM_SETTLING;
+          rSettlingStartSv.value = wallMs;
+          rBouncesSv.value = 0;
+          rPrevZSv.value = z;
+          rStableAccumSv.value = 0;
+        }
+      } else if (rs === FSM_SETTLING) {
+        const prevZr = rPrevZSv.value;
+        if (Math.abs(prevZr) > zxEps * 0.5 && Math.abs(z) > zxEps * 0.5 && prevZr * z < 0) {
+          rBouncesSv.value += 1;
+        }
+        rPrevZSv.value = z;
+
+        if (absZ <= stableZ) {
+          rStableAccumSv.value += deltaMs;
+        } else {
+          rStableAccumSv.value = 0;
+        }
+
+        const rSettlingStart = rSettlingStartSv.value;
+        if (wallMs - rSettlingStart > SETTLING_ABORT_MS) {
+          rStateSv.value = FSM_IDLE;
+          rMaxPeakSv.value = 0;
+          rBouncesSv.value = 0;
+          rStableAccumSv.value = 0;
+        } else if (rStableAccumSv.value >= holdMs) {
+          const settlingDurationMs = wallMs - rSettlingStart;
+          const peak = rMaxPeakSv.value;
+          const bounces = rBouncesSv.value;
+          const impactStart = rImpactMsSv.value;
+          const diagBase = evaluateDiagnostics(peak, bounces, settlingDurationMs, harshG, overMs);
+
+          runOnJS(emitRearWithStoredFrontJS)({
+            maxPeakZG: peak,
+            bounceCount: bounces,
+            impactStartMs: impactStart,
+            settlingDurationMs,
+            compressionAdvice: diagBase.compressionAdvice,
+            reboundAdvice: diagBase.reboundAdvice,
+            surfaceStatus: diagBase.surfaceStatus,
+            pitchBiasNote: '',
+          });
+
+          rStateSv.value = FSM_IDLE;
+          rMaxPeakSv.value = 0;
+          rBouncesSv.value = 0;
+          rStableAccumSv.value = 0;
+        }
+      }
+    };
+    return w;
+  }, [
+    emitFrontDoneJS,
+    emitRearWithStoredFrontJS,
+    hasCalib,
+    vertZ,
+    pitchDeg,
+    bumpThresholdG,
+    stableZoneG,
+    stableHoldMs,
+    harshPeakG,
+    overdampedSettlingMs,
+    zeroCrossEpsG,
+    speedKmH,
+  ]);
+
+  useFrameCallback(bumpWorklet);
+
+  const resetBumpFsm = useCallback(() => {
+    lastFrontDiagRef.current = null;
+    runOnUI(() => {
+      'worklet';
+      fStateSv.value = FSM_IDLE;
+      fMaxPeakSv.value = 0;
+      fBouncesSv.value = 0;
+      fImpactMsSv.value = 0;
+      fSettlingStartSv.value = 0;
+      fPrevZSv.value = 0;
+      fStableAccumSv.value = 0;
+      fPitchAtImpactSv.value = 0;
+
+      rearKickAtMsSv.value = 0;
+
+      rStateSv.value = FSM_IDLE;
+      rMaxPeakSv.value = 0;
+      rBouncesSv.value = 0;
+      rImpactMsSv.value = 0;
+      rSettlingStartSv.value = 0;
+      rPrevZSv.value = 0;
+      rStableAccumSv.value = 0;
+    })();
+  }, [
+    fStateSv,
+    fMaxPeakSv,
+    fBouncesSv,
+    fImpactMsSv,
+    fSettlingStartSv,
+    fPrevZSv,
+    fStableAccumSv,
+    fPitchAtImpactSv,
+    rearKickAtMsSv,
+    rStateSv,
+    rMaxPeakSv,
+    rBouncesSv,
+    rImpactMsSv,
+    rSettlingStartSv,
+    rPrevZSv,
+    rStableAccumSv,
+  ]);
+
+  return { resetBumpFsm };
+}
+</file>
+
+<file path="components/telemetry/OscilloscopeView.tsx">
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
+import React, { useCallback, useRef, useState } from 'react';
+import { Alert, useWindowDimensions, View } from 'react-native';
+import { useSharedValue } from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import {
+  applyPresetConfig,
+  TELEMETRY_PRESETS,
+  type TelemetryPresetId,
+  type TelemetryPresetMode,
+} from './telemetryPresets';
+import {
+  type SuspensionBumpDiagResult,
+  useSuspensionBumpFsm,
+} from './useSuspensionBumpFsm';
+import { WHEELBASE_M } from './oscilloscope/dspConstants';
+import { MONO_FONT } from './oscilloscope/constants';
+import { OscilloscopeChart } from './oscilloscope/OscilloscopeChart';
+import { OscilloscopeDashboard } from './oscilloscope/OscilloscopeDashboard';
+import { styles } from './oscilloscope/styles';
+import { useOscilloscopeCalibration } from './oscilloscope/hooks/useOscilloscopeCalibration';
+import { useOscilloscopeSharedValues } from './oscilloscope/hooks/useOscilloscopeSharedValues';
+import { useOscilloscopeTelemetryEngine } from './oscilloscope/hooks/useOscilloscopeTelemetryEngine';
+
+export default function OscilloscopeView() {
+  const { width: winW, height: winH } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const mono = (MONO_FONT as string) ?? 'monospace';
+
+  const sv = useOscilloscopeSharedValues(winW, winH);
+
+  const {
+    cleanVertZSv,
+    hasCalibSv,
+    bumpThresholdGsv,
+    stableZoneGsv,
+    stableHoldMssv,
+    harshPeakGsv,
+    overdampedSettlingMssv,
+    zeroCrossEpsGsv,
+    vertFastAlphaSv,
+    sensitivityMultiplierSv,
+  } = sv;
+
+  const hfLogRef = useRef<any[]>([]);
+  const isHfLoggingSv = useSharedValue(0);
+  const [isHfLogging, setIsHfLogging] = useState(false);
+
+  const appendHfData = useCallback((z: number, pitch: number, roll: number, speed: number) => {
+    hfLogRef.current.push({
+      t: Date.now(),
+      z: Number(z.toFixed(3)),
+      p: Number(pitch.toFixed(1)),
+      r: Number(roll.toFixed(1)),
+      s: Number(speed.toFixed(1)),
+    });
+  }, []);
+
+  const toggleHfLog = useCallback(() => {
+    setIsHfLogging((prev) => {
+      const turningOn = !prev;
+      if (turningOn) {
+        hfLogRef.current = [];
+        isHfLoggingSv.value = 1;
+      } else {
+        isHfLoggingSv.value = 0;
+      }
+      return turningOn;
+    });
+  }, [isHfLoggingSv]);
+
+  const [precisionCalBusy, setPrecisionCalBusy] = useState(false);
+  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
+  const [dashLocked, setDashLocked] = useState(false);
+  const [frontBumpDiag, setFrontBumpDiag] = useState<SuspensionBumpDiagResult | null>(null);
+  const [rearBumpDiag, setRearBumpDiag] = useState<SuspensionBumpDiagResult | null>(null);
+  const [telemetryPresetMode, setTelemetryPresetMode] = useState<TelemetryPresetMode>('HIGH_SPEED_IMPACT');
+  const [dspPresetSyncNonce, setDspPresetSyncNonce] = useState(0);
+
+  const exportToJSON = useCallback(async () => {
+    if (hfLogRef.current.length === 0) {
+      Alert.alert('No HF telemetry to export');
+      return;
+    }
+    const currentConfig =
+      telemetryPresetMode === 'custom'
+        ? {
+            name: 'Custom',
+            alpha: vertFastAlphaSv.value,
+            multiplier: sensitivityMultiplierSv.value,
+            threshold: bumpThresholdGsv.value,
+            stableZone: stableZoneGsv.value,
+            stableHoldMs: stableHoldMssv.value,
+            harshPeakG: harshPeakGsv.value,
+            overdampedSettlingMs: overdampedSettlingMssv.value,
+          }
+        : TELEMETRY_PRESETS[telemetryPresetMode];
+    const exportPayload = {
+      metadata: {
+        exportTime: new Date().toISOString(),
+        presetMode: telemetryPresetMode,
+        config: currentConfig,
+        wheelbase_m: WHEELBASE_M,
+      },
+      data: hfLogRef.current,
+    };
+    const jsonStr = JSON.stringify(exportPayload);
+    const baseUri = FileSystem.documentDirectory;
+    if (!baseUri) {
+      Alert.alert('Export failed', 'Documents directory unavailable.');
+      return;
+    }
+    const uri = `${baseUri}Lauda_HF_${Date.now()}.json`;
+    try {
+      await FileSystem.writeAsStringAsync(uri, jsonStr, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      await Sharing.shareAsync(uri);
+    } catch (e) {
+      Alert.alert('Export failed', e instanceof Error ? e.message : 'Could not write or share.');
+    }
+  }, [
+    bumpThresholdGsv,
+    harshPeakGsv,
+    overdampedSettlingMssv,
+    sensitivityMultiplierSv,
+    stableHoldMssv,
+    stableZoneGsv,
+    telemetryPresetMode,
+    vertFastAlphaSv,
+  ]);
+
+  const onDiagnosticsReady = useCallback(
+    (front: SuspensionBumpDiagResult, rear: SuspensionBumpDiagResult | null) => {
+      setFrontBumpDiag(front);
+      setRearBumpDiag(rear);
+    },
+    []
+  );
+
+  const clearBumpDiagnostics = useCallback(() => {
+    setFrontBumpDiag(null);
+    setRearBumpDiag(null);
+  }, []);
+
+  const selectTelemetryPreset = useCallback(
+    (id: TelemetryPresetId) => {
+      applyPresetConfig(TELEMETRY_PRESETS[id], {
+        vertFastAlphaSv,
+        sensitivityMultiplierSv,
+        bumpThresholdG: bumpThresholdGsv,
+        stableZoneG: stableZoneGsv,
+        stableHoldMs: stableHoldMssv,
+        harshPeakG: harshPeakGsv,
+        overdampedSettlingMs: overdampedSettlingMssv,
+      });
+      setTelemetryPresetMode(id);
+      setDspPresetSyncNonce((n) => n + 1);
+    },
+    [
+      bumpThresholdGsv,
+      harshPeakGsv,
+      overdampedSettlingMssv,
+      sensitivityMultiplierSv,
+      stableHoldMssv,
+      stableZoneGsv,
+      vertFastAlphaSv,
+    ]
+  );
+
+  const telemetryPresetLabel =
+    telemetryPresetMode === 'custom' ? 'Custom DSP' : TELEMETRY_PRESETS[telemetryPresetMode].name;
+
+  const { resetBumpFsm } = useSuspensionBumpFsm({
+    vertZ: cleanVertZSv,
+    hasCalib: hasCalibSv,
+    pitchDeg: sv.dspPitchDeg,
+    onDiagnosticsReady,
+    bumpThresholdG: bumpThresholdGsv,
+    stableZoneG: stableZoneGsv,
+    stableHoldMs: stableHoldMssv,
+    harshPeakG: harshPeakGsv,
+    overdampedSettlingMs: overdampedSettlingMssv,
+    zeroCrossEpsG: zeroCrossEpsGsv,
+    speedKmH: sv.speedKmH,
+  });
+
+  const settlePrecisionCalib = useCallback(() => setPrecisionCalBusy(false), []);
+
+  const {
+    hud,
+    onChartLayout,
+    gridPath,
+    baselinePath,
+    oscilloscopePath,
+    terrainKindSv,
+    terrainOverlayOpacitySv,
+  } = useOscilloscopeTelemetryEngine(
+    winW,
+    winH,
+    dashLocked,
+    setAdvancedSettingsOpen,
+    sv,
+    isHfLoggingSv,
+    appendHfData,
+    settlePrecisionCalib
+  );
+
+  const { startPrecisionCalibrate, resetPeakMax } = useOscilloscopeCalibration({
+    sv,
+    resetBumpFsm,
+    clearBumpDiagnostics,
+    setPrecisionCalibBusy: setPrecisionCalBusy,
+  });
+
+  return (
+    <View style={styles.root}>
+      <OscilloscopeChart
+        gridPath={gridPath}
+        baselinePath={baselinePath}
+        oscilloscopePath={oscilloscopePath}
+        terrainKindSv={terrainKindSv}
+        terrainOverlayOpacitySv={terrainOverlayOpacitySv}
+        onLayout={onChartLayout}
+        mono={mono}
+        calStateSv={sv.calStateSv}
+        calProgressSv={sv.calProgressSv}
+        chartWsv={sv.chartWsv}
+      />
+
+      <OscilloscopeDashboard
+        mono={mono}
+        bottomInsetPad={insets.bottom}
+        dashLocked={dashLocked}
+        setDashLocked={setDashLocked}
+        advancedSettingsOpen={advancedSettingsOpen}
+        setAdvancedSettingsOpen={setAdvancedSettingsOpen}
+        hud={hud}
+        frontBumpDiag={frontBumpDiag}
+        rearBumpDiag={rearBumpDiag}
+        telemetryPresetMode={telemetryPresetMode}
+        telemetryPresetLabel={telemetryPresetLabel}
+        selectTelemetryPreset={selectTelemetryPreset}
+        sv={sv}
+        dspPresetSyncNonce={dspPresetSyncNonce}
+        setTelemetryPresetMode={setTelemetryPresetMode}
+        precisionCalBusy={precisionCalBusy}
+        resetPeakMax={resetPeakMax}
+        startPrecisionCalibrate={startPrecisionCalibrate}
+        isHfLogging={isHfLogging}
+        toggleHfLog={toggleHfLog}
+        exportToJSON={exportToJSON}
+      />
+    </View>
+  );
+}
+</file>
+
+</files>
