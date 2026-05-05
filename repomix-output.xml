@@ -32,7 +32,7 @@ The content is organized as follows:
 <notes>
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Only files matching these patterns are included: components
+- Only files matching these patterns are included: components, utils
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 - Files are sorted by Git change count (files with more changes are at the bottom)
@@ -66,6 +66,7 @@ components/
     PerformanceAnalyzerView.tsx
     telemetryPresets.ts
     useForegroundGpsStream.ts
+    useObd2Bluetooth.ts
     usePerformanceAnalyzer.ts
     useSuspensionBumpFsm.ts
   ui/
@@ -73,242 +74,126 @@ components/
     icon-symbol.tsx
   app-error-boundary.tsx
   haptic-tab.tsx
+utils/
+  obd2Decoder.ts
+  permissions.ts
+  repomix-output.xml
 </directory_structure>
 
 <files>
 This section contains the contents of the repository's files.
 
-<file path="components/telemetry/EcuDashboard.tsx">
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, ScrollView, Text, View } from 'react-native';
-import {
-  runOnJS,
-  useAnimatedReaction,
-  useSharedValue,
-} from 'react-native-reanimated';
+<file path="utils/permissions.ts">
+import { PermissionsAndroid, Platform } from 'react-native';
 
-import { MONO_FONT } from './oscilloscope/constants';
-import { HudMetricTile } from './oscilloscope/HudMetricTile';
-import { styles } from './oscilloscope/styles';
+/** Best-effort type for PermissionsAndroid.requestMultiple return map. */
+type PermissionOutcomeMap = Partial<Record<string, string>>;
 
-export type EcuConnectPhase = 'idle' | 'scanning' | 'connected';
+/**
+ * Requests Android Bluetooth-related runtime permissions before opening an SPP socket:
+ * `ACCESS_FINE_LOCATION`, and on API 31+ `BLUETOOTH_SCAN` + `BLUETOOTH_CONNECT`.
+ *
+ * Non-Android: resolves `true` (no-op). Pass `onStep` to mirror each outcome in the OBD terminal.
+ */
+export async function requestBluetoothPermissions(
+  onStep?: (message: string) => void
+): Promise<boolean> {
+  if (Platform.OS !== 'android') {
+    onStep?.(`Permission step: skipping (Platform.OS=${Platform.OS})`);
+    return true;
+  }
 
-type HudStrings = {
-  rpm: string;
-  coolant: string;
-  intake: string;
-  tps: string;
-  batt: string;
-  speed: string;
-};
+  try {
+    const sdk = typeof Platform.Version === 'number' ? Platform.Version : 0;
+    const keys = [
+      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+      ...(sdk >= 31
+        ? [
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          ]
+        : []),
+    ];
 
-export default function EcuDashboard() {
-  const mono = (MONO_FONT as string) ?? 'monospace';
+    onStep?.(`Permission step: invoking requestMultiple (Android SDK ${sdk}) …`);
+    onStep?.(`Permission step: keys → ${keys.join(', ')}`);
 
-  const rpmSv = useSharedValue(1200);
-  const coolantSv = useSharedValue(85);
-  const intakeSv = useSharedValue(32);
-  const tpsSv = useSharedValue(5.5);
-  const battSv = useSharedValue(12.4);
-  const speedSv = useSharedValue(45);
-
-  const [disp, setDisp] = useState<HudStrings>({
-    rpm: '1200',
-    coolant: '85',
-    intake: '32',
-    tps: '5.5',
-    batt: '12.4',
-    speed: '45',
-  });
-
-  const flushHudFromSv = useCallback(
-    (r: number, c: number, i: number, t: number, b: number, s: number) => {
-      setDisp({
-        rpm: String(Math.round(r)),
-        coolant: String(Math.round(c)),
-        intake: String(Math.round(i)),
-        tps: t.toFixed(1),
-        batt: b.toFixed(1),
-        speed: String(Math.round(s)),
-      });
-    },
-    []
-  );
-
-  useAnimatedReaction(
-    () =>
-      `${rpmSv.value}|${coolantSv.value}|${intakeSv.value}|${tpsSv.value}|${battSv.value}|${speedSv.value}`,
-    (sig, prev) => {
-      if (sig === prev) {
-        return;
-      }
-      const p = sig.split('|');
-      const r = Number(p[0]);
-      const c = Number(p[1]);
-      const i = Number(p[2]);
-      const t = Number(p[3]);
-      const b = Number(p[4]);
-      const s = Number(p[5]);
-      runOnJS(flushHudFromSv)(r, c, i, t, b, s);
-    },
-    [flushHudFromSv]
-  );
-
-  useEffect(() => {
-    flushHudFromSv(
-      rpmSv.value,
-      coolantSv.value,
-      intakeSv.value,
-      tpsSv.value,
-      battSv.value,
-      speedSv.value
+    const outcomes = await PermissionsAndroid.requestMultiple(
+      keys as unknown as Parameters<typeof PermissionsAndroid.requestMultiple>[0]
     );
-  }, [rpmSv, coolantSv, intakeSv, tpsSv, battSv, speedSv, flushHudFromSv]);
+    const map = outcomes as PermissionOutcomeMap;
 
-  const [phase, setPhase] = useState<EcuConnectPhase>('idle');
-  const scanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (scanTimerRef.current) {
-        clearTimeout(scanTimerRef.current);
+    let allGranted = true;
+    for (const key of keys) {
+      const r = map[key];
+      onStep?.(`Permission step: outcome ${key} → ${String(r)}`);
+      if (r !== PermissionsAndroid.RESULTS.GRANTED) {
+        allGranted = false;
       }
-    };
-  }, []);
-
-  const connCopy = useMemo(() => {
-    switch (phase) {
-      case 'scanning':
-        return {
-          name: 'Scanning for Vgate…',
-          mac: '—',
-          latency: '—',
-          btnLabel: 'SCANNING…',
-        };
-      case 'connected':
-        return {
-          name: 'Vgate iCar 2s',
-          mac: 'AA:BB:CC:DD:EE:FF',
-          latency: '42',
-          btnLabel: 'DISCONNECT',
-        };
-      default:
-        return {
-          name: 'Not connected',
-          mac: '—',
-          latency: '—',
-          btnLabel: 'OBD CONNECT',
-        };
     }
-  }, [phase]);
 
-  const onObdPress = () => {
-    if (phase === 'idle') {
-      setPhase('scanning');
-      if (scanTimerRef.current) {
-        clearTimeout(scanTimerRef.current);
-      }
-      scanTimerRef.current = setTimeout(() => {
-        setPhase('connected');
-        scanTimerRef.current = null;
-      }, 2600);
-      return;
-    }
-    if (phase === 'scanning') {
-      if (scanTimerRef.current) {
-        clearTimeout(scanTimerRef.current);
-        scanTimerRef.current = null;
-      }
-      setPhase('idle');
-      return;
-    }
-    setPhase('idle');
-  };
-
-  return (
-    <ScrollView
-      style={styles.bottomPanel}
-      contentContainerStyle={{ paddingBottom: 28 }}
-      keyboardShouldPersistTaps="handled"
-    >
-      <View style={styles.hudTopBar}>
-        <View style={styles.logoCluster}>
-          <Text style={[styles.logo, { fontFamily: mono }]}>LAUDA Lab</Text>
-          <Text style={[styles.ecuScreenTitle, { fontFamily: mono }]}>ECU TELEMETRY</Text>
-        </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={
-            phase === 'connected'
-              ? 'Disconnect OBD adapter'
-              : phase === 'scanning'
-                ? 'Cancel Bluetooth scan'
-                : 'Scan and connect OBD adapter'
-          }
-          onPress={onObdPress}
-          style={({ pressed }) => [
-            styles.ecuConnectBtn,
-            phase === 'scanning' && styles.ecuConnectBtnScanning,
-            phase === 'connected' && styles.ecuConnectBtnConnected,
-            pressed && styles.calBtnPressed,
-          ]}
-        >
-          <View pointerEvents="none" style={styles.ecuConnectGlow} />
-          <Text
-            style={[
-              styles.ecuConnectLabel,
-              { fontFamily: mono },
-              phase === 'scanning' && styles.ecuConnectLabelScanning,
-              phase === 'connected' && styles.ecuConnectLabelConnected,
-            ]}
-          >
-            {connCopy.btnLabel}
-          </Text>
-        </Pressable>
-      </View>
-
-      <View style={styles.hudSection}>
-        <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Connection</Text>
-        <View style={styles.performanceCard}>
-          <View style={styles.ecuInfoRow}>
-            <Text style={[styles.ecuInfoKey, { fontFamily: mono }]}>Device</Text>
-            <Text style={[styles.ecuInfoVal, { fontFamily: mono }]} numberOfLines={1}>
-              {connCopy.name}
-            </Text>
-          </View>
-          <View style={styles.ecuInfoRow}>
-            <Text style={[styles.ecuInfoKey, { fontFamily: mono }]}>MAC</Text>
-            <Text style={[styles.ecuInfoVal, { fontFamily: mono }]}>{connCopy.mac}</Text>
-          </View>
-          <View style={styles.ecuInfoRow}>
-            <Text style={[styles.ecuInfoKey, { fontFamily: mono }]}>Latency</Text>
-            <Text style={[styles.ecuInfoVal, { fontFamily: mono }]}>
-              {connCopy.latency === '—' ? '—' : `${connCopy.latency} ms`}
-            </Text>
-          </View>
-        </View>
-      </View>
-
-      <View style={[styles.hudSection, { marginTop: 4 }]}>
-        <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Live ECU</Text>
-        <View style={styles.hudMetricRow}>
-          <HudMetricTile label="RPM" value={disp.rpm} suffix="rpm" mono={mono} />
-          <HudMetricTile label="Coolant" value={disp.coolant} suffix="°C" mono={mono} />
-          <HudMetricTile label="Intake" value={disp.intake} suffix="°C" mono={mono} />
-        </View>
-        <View style={[styles.hudMetricRow, { marginTop: 10 }]}>
-          <HudMetricTile label="TPS" value={disp.tps} suffix="%" mono={mono} />
-          <HudMetricTile label="Batt" value={disp.batt} suffix="V" mono={mono} />
-          <HudMetricTile label="ECU speed" value={disp.speed} suffix="km/h" mono={mono} />
-        </View>
-      </View>
-
-      <Text style={[styles.performanceHint, { fontFamily: mono, marginTop: 10 }]}>
-        ELM327 over BLE (Vgate iCar 2s). Rebuild dev client after adding the BLE config plugin.
-      </Text>
-    </ScrollView>
-  );
+    onStep?.(
+      `Permission step: final ${allGranted ? 'ALLOWED — proceed' : 'BLOCKED — cannot open SPP'}`
+    );
+    return allGranted;
+  } catch (e) {
+    onStep?.(`Permission step: exception ${JSON.stringify(e)}`);
+    return false;
+  }
 }
+</file>
+
+<file path="utils/repomix-output.xml">
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: components
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+</files>
 </file>
 
 <file path="components/telemetry/oscilloscope/AxisBumpAdviceCard.tsx">
@@ -757,6 +642,296 @@ export type HudSnap = {
 };
 </file>
 
+<file path="components/telemetry/EcuDashboard.tsx">
+import React, { useCallback, useEffect, useState } from 'react';
+import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
+import {
+  runOnJS,
+  useAnimatedReaction,
+  useSharedValue,
+} from 'react-native-reanimated';
+
+import { useObd2Bluetooth, type EcMetricSnapshot } from './useObd2Bluetooth';
+import { MONO_FONT } from './oscilloscope/constants';
+import { HudMetricTile } from './oscilloscope/HudMetricTile';
+import { styles } from './oscilloscope/styles';
+
+const ZERO_SNAPSHOT: EcMetricSnapshot = {
+  rpm: 0,
+  coolant: 0,
+  intake: 0,
+  tps: 0,
+  batt: 0,
+  ecuSpeed: 0,
+};
+
+type HudStrings = {
+  rpm: string;
+  coolant: string;
+  intake: string;
+  tps: string;
+  batt: string;
+  speed: string;
+};
+
+function snapshotToHudStrings(m: EcMetricSnapshot): HudStrings {
+  return {
+    rpm: String(Math.round(m.rpm)),
+    coolant: String(Math.round(m.coolant)),
+    intake: String(Math.round(m.intake)),
+    tps: m.tps.toFixed(1),
+    batt: m.batt.toFixed(1),
+    speed: String(Math.round(m.ecuSpeed)),
+  };
+}
+
+export default function EcuDashboard() {
+  const mono = (MONO_FONT as string) ?? 'monospace';
+
+  const rpmSv = useSharedValue(0);
+  const coolantSv = useSharedValue(0);
+  const intakeSv = useSharedValue(0);
+  const tpsSv = useSharedValue(0);
+  const battSv = useSharedValue(0);
+  const speedSv = useSharedValue(0);
+
+  const [disp, setDisp] = useState<HudStrings>(() => snapshotToHudStrings(ZERO_SNAPSHOT));
+
+  const [logs, setLogs] = useState<string[]>([]);
+
+  const appendLog = useCallback((msg: string) => {
+    const time = new Date().toISOString().substring(11, 19);
+    setLogs((prev) => [...prev, `[${time}] ${msg}`].slice(-50));
+  }, []);
+
+  const flushHudFromSv = useCallback(
+    (r: number, c: number, i: number, t: number, b: number, s: number) => {
+      setDisp({
+        rpm: String(Math.round(r)),
+        coolant: String(Math.round(c)),
+        intake: String(Math.round(i)),
+        tps: t.toFixed(1),
+        batt: b.toFixed(1),
+        speed: String(Math.round(s)),
+      });
+    },
+    []
+  );
+
+  useAnimatedReaction(
+    () =>
+      `${rpmSv.value}|${coolantSv.value}|${intakeSv.value}|${tpsSv.value}|${battSv.value}|${speedSv.value}`,
+    (sig, prev) => {
+      if (sig === prev) {
+        return;
+      }
+      const p = sig.split('|');
+      runOnJS(flushHudFromSv)(
+        Number(p[0]),
+        Number(p[1]),
+        Number(p[2]),
+        Number(p[3]),
+        Number(p[4]),
+        Number(p[5])
+      );
+    },
+    [flushHudFromSv]
+  );
+
+  useEffect(() => {
+    flushHudFromSv(
+      rpmSv.value,
+      coolantSv.value,
+      intakeSv.value,
+      tpsSv.value,
+      battSv.value,
+      speedSv.value
+    );
+  }, [rpmSv, coolantSv, intakeSv, tpsSv, battSv, speedSv, flushHudFromSv]);
+
+  const onBleError = useCallback((title: string, message: string) => {
+    Alert.alert(title, message);
+  }, []);
+
+  const applyMetricsFromBle = useCallback(
+    (m: EcMetricSnapshot) => {
+      rpmSv.value = m.rpm;
+      coolantSv.value = m.coolant;
+      intakeSv.value = m.intake;
+      tpsSv.value = m.tps;
+      battSv.value = m.batt;
+      speedSv.value = m.ecuSpeed;
+    },
+    [battSv, coolantSv, intakeSv, rpmSv, speedSv, tpsSv]
+  );
+
+  const {
+    phase,
+    deviceName,
+    macAddress,
+    latencyMsDisplay,
+    connectToObd,
+    cancelScan,
+    disconnect,
+  } = useObd2Bluetooth({
+    onMetrics: applyMetricsFromBle,
+    onError: onBleError,
+    onLog: appendLog,
+  });
+
+  const latencyLabel =
+    latencyMsDisplay === '—' ? '—' : `${latencyMsDisplay} ms`;
+
+  const primaryLabel =
+    phase === 'connected'
+      ? 'DISCONNECT'
+      : phase === 'scanning'
+        ? 'CANCEL'
+        : phase === 'error'
+          ? 'RETRY CONNECT'
+          : 'OBD CONNECT';
+
+  const onPrimaryPress =
+    phase === 'connected'
+      ? () => {
+          appendLog('UI: disconnect requested');
+          void disconnect();
+        }
+      : phase === 'scanning'
+        ? () => {
+            appendLog('UI: cancel in-flight connection');
+            void cancelScan();
+          }
+        : () => {
+            appendLog('UI: connectToObd requested from dashboard');
+            connectToObd();
+          };
+
+  return (
+    <ScrollView
+      style={styles.bottomPanel}
+      contentContainerStyle={{ paddingBottom: 28 }}
+      keyboardShouldPersistTaps="handled"
+    >
+      <View style={styles.hudTopBar}>
+        <View style={styles.logoCluster}>
+          <Text style={[styles.logo, { fontFamily: mono }]}>LAUDA Lab</Text>
+          <Text style={[styles.ecuScreenTitle, { fontFamily: mono }]}>ECU TELEMETRY</Text>
+        </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={
+            phase === 'connected'
+              ? 'Disconnect OBD adapter'
+              : phase === 'scanning'
+                ? 'Cancel connection attempt'
+                : phase === 'error'
+                  ? 'Retry connecting to OBD adapter'
+                  : 'Connect to paired OBD adapter'
+          }
+          onPress={onPrimaryPress}
+          style={({ pressed }) => [
+            styles.ecuConnectBtn,
+            phase === 'scanning' && styles.ecuConnectBtnScanning,
+            phase === 'connected' && styles.ecuConnectBtnConnected,
+            phase === 'error' && styles.ecuConnectBtnError,
+            pressed && styles.calBtnPressed,
+          ]}
+        >
+          <View pointerEvents="none" style={styles.ecuConnectGlow} />
+          <Text
+            style={[
+              styles.ecuConnectLabel,
+              { fontFamily: mono },
+              phase === 'scanning' && styles.ecuConnectLabelScanning,
+              phase === 'connected' && styles.ecuConnectLabelConnected,
+              phase === 'error' && styles.ecuConnectLabelError,
+            ]}
+          >
+            {primaryLabel}
+          </Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.hudSection}>
+        <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Connection</Text>
+        <View style={styles.performanceCard}>
+          <View style={styles.ecuInfoRow}>
+            <Text style={[styles.ecuInfoKey, { fontFamily: mono }]}>Device</Text>
+            <Text style={[styles.ecuInfoVal, { fontFamily: mono }]} numberOfLines={1}>
+              {deviceName}
+            </Text>
+          </View>
+          <View style={styles.ecuInfoRow}>
+            <Text style={[styles.ecuInfoKey, { fontFamily: mono }]}>MAC / ID</Text>
+            <Text style={[styles.ecuInfoVal, { fontFamily: mono }]} numberOfLines={1}>
+              {macAddress}
+            </Text>
+          </View>
+          <View style={styles.ecuInfoRow}>
+            <Text style={[styles.ecuInfoKey, { fontFamily: mono }]}>Latency</Text>
+            <Text style={[styles.ecuInfoVal, { fontFamily: mono }]}>{latencyLabel}</Text>
+          </View>
+        </View>
+      </View>
+
+      <View style={[styles.hudSection, { marginTop: 4 }]}>
+        <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>Live ECU</Text>
+        <View style={styles.hudMetricRow}>
+          <HudMetricTile label="RPM" value={disp.rpm} suffix="rpm" mono={mono} />
+          <HudMetricTile label="Coolant" value={disp.coolant} suffix="°C" mono={mono} />
+          <HudMetricTile label="Intake" value={disp.intake} suffix="°C" mono={mono} />
+        </View>
+        <View style={[styles.hudMetricRow, { marginTop: 10 }]}>
+          <HudMetricTile label="TPS" value={disp.tps} suffix="%" mono={mono} />
+          <HudMetricTile label="Batt" value={disp.batt} suffix="V" mono={mono} />
+          <HudMetricTile label="ECU speed" value={disp.speed} suffix="km/h" mono={mono} />
+        </View>
+      </View>
+
+      <Text style={[styles.performanceHint, { fontFamily: mono, marginTop: 10 }]}>
+        ELM327 over Bluetooth Classic (SPP)—pair dongle (e.g. Android-Vlink) in system settings first ·
+        ignition on · values require a live adapter + ECU.
+      </Text>
+
+      <View style={[styles.hudSection, { marginTop: 16}]}>
+        <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>OBD TERMINAL</Text>
+        <View
+          style={{
+            height: 300,
+            backgroundColor: '#000000',
+            borderWidth: 1,
+            borderColor: '#1c2f24',
+            padding: 8,
+          }}
+        >
+          <ScrollView
+            nestedScrollEnabled
+            style={{ flex: 1 }}
+            contentContainerStyle={{ flexGrow: 1, paddingBottom: 4 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            {logs.map((line, i) => (
+              <Text
+                key={`log-${i}`}
+                style={{
+                  fontFamily: mono,
+                  fontSize: 9,
+                  color: '#2cff8a',
+                }}
+                selectable
+              >
+                {line}
+              </Text>
+            ))}
+          </ScrollView>
+        </View>
+      </View>
+    </ScrollView>
+  );
+}
+</file>
+
 <file path="components/telemetry/useForegroundGpsStream.ts">
 import * as Location from 'expo-location';
 import { useEffect, useRef } from 'react';
@@ -828,6 +1003,734 @@ export function useForegroundGpsStream({ speedKmH, onSample }: UseForegroundGpsS
       void sub?.remove();
     };
   }, [speedKmH]);
+}
+</file>
+
+<file path="components/telemetry/useObd2Bluetooth.ts">
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { NativeModules, Platform } from 'react-native';
+import RNBluetoothClassic, {
+  type BluetoothDevice,
+  type BluetoothEventSubscription,
+} from 'react-native-bluetooth-classic';
+
+import {
+  decodeElmResponse,
+  parseCoolantTemp,
+  parseEngineRpm,
+  parseIntakeAirTemp,
+  parseThrottlePosition,
+  parseVehicleSpeed,
+  parseVoltage,
+} from '@/utils/obd2Decoder';
+import { requestBluetoothPermissions } from '@/utils/permissions';
+
+export type EcuConnectPhase = 'idle' | 'scanning' | 'connected' | 'error';
+
+export type EcMetricSnapshot = {
+  rpm: number;
+  coolant: number;
+  intake: number;
+  tps: number;
+  batt: number;
+  ecuSpeed: number;
+};
+
+const POLL_GAP_MS = 140;
+/** ELM/ST FF + adaptive timing + slower Euro-5 29‑bit buses need a generous ceiling. */
+const RESP_TIMEOUT_MS = 9000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Paired SPP dongles: Android-Vlink, generic OBD names, etc. */
+const NAME_MARKERS = ['VLINK', 'OBD'] as const;
+
+function normalizeBtAddr(addr: string | undefined): string {
+  return String(addr ?? '').replace(/[:-]/g, '').toUpperCase();
+}
+
+function sameBtAddr(a: string | undefined, b: string | undefined): boolean {
+  return normalizeBtAddr(a) === normalizeBtAddr(b);
+}
+
+function isObdClassicName(name: string | undefined): boolean {
+  const n = `${name ?? ''}`.toUpperCase();
+  return NAME_MARKERS.some((m) => n.includes(m));
+}
+
+function obdSnippetForParser(rawResponse: string): string {
+  const upper = rawResponse.toUpperCase();
+  if (upper.includes('NO DATA')) return '';
+  const parts = rawResponse.split(/[\r\n]+/);
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    const line = parts[i]?.trim();
+    if (!line || line === '>' || /^UNABLE/i.test(line)) continue;
+    if (/SEARCHING|BUS INIT/i.test(line)) continue;
+    return line;
+  }
+  return rawResponse.trim();
+}
+
+function createDeferredString(): {
+  promise: Promise<string>;
+  resolve: (v: string) => void;
+  reject: (e: Error) => void;
+} {
+  let resolve!: (v: string) => void;
+  let reject!: (e: Error) => void;
+  const promise = new Promise<string>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const ZERO_METRICS: EcMetricSnapshot = {
+  rpm: 0,
+  coolant: 0,
+  intake: 0,
+  tps: 0,
+  batt: 0,
+  ecuSpeed: 0,
+};
+
+type UseObd2BluetoothOpts = {
+  onMetrics?: (m: EcMetricSnapshot) => void;
+  onError?: (title: string, message: string) => void;
+  onLog?: (msg: string) => void;
+};
+
+function logBleException(onLog: ((msg: string) => void) | undefined, e: unknown): void {
+  let line = '';
+  try {
+    line = `BT ERROR: ${JSON.stringify(e)}`;
+  } catch {
+    line = `BT ERROR: ${String(e)}`;
+  }
+  onLog?.(line);
+  if (typeof e === 'object' && e !== null) {
+    const msg = String((e as { message?: unknown }).message ?? '');
+    if (msg && !line.includes(msg)) {
+      onLog?.(`BT ERROR message: ${msg}`);
+    }
+  }
+}
+
+export function useObd2Bluetooth({ onMetrics, onError, onLog }: UseObd2BluetoothOpts): {
+  phase: EcuConnectPhase;
+  deviceName: string;
+  macAddress: string;
+  latencyMsDisplay: string;
+  lastBleError: string | null;
+  connectToObd: () => void;
+  cancelScan: () => void;
+  disconnect: () => void;
+} {
+  const [phase, setPhase] = useState<EcuConnectPhase>('idle');
+  const [deviceName, setDeviceName] = useState('Not connected');
+  const [macAddress, setMacAddress] = useState('—');
+  const [latencyMsDisplay, setLatencyMsDisplay] = useState('—');
+  const [lastBleError, setLastBleError] = useState<string | null>(null);
+
+  const onMetricsRef = useRef(onMetrics);
+  const onErrorRef = useRef(onError);
+  const onLogRef = useRef(onLog);
+  onMetricsRef.current = onMetrics;
+  onErrorRef.current = onError;
+  onLogRef.current = onLog;
+
+  const log = useCallback((msg: string) => {
+    onLogRef.current?.(msg);
+  }, []);
+
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+
+  const deviceRef = useRef<BluetoothDevice | null>(null);
+  const connectionEpochRef = useRef(0);
+
+  const dataRecvSubRef = useRef<BluetoothEventSubscription | null>(null);
+  const moduleDiscSubRef = useRef<BluetoothEventSubscription | null>(null);
+  const moduleErrorSubRef = useRef<BluetoothEventSubscription | null>(null);
+
+  const rxAccumRef = useRef('');
+  const pendingRef = useRef<ReturnType<typeof createDeferredString> | null>(null);
+  const respTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const pollActiveRef = useRef(false);
+  const latencySamplesRef = useRef<number[]>([]);
+  const battCarryRef = useRef(0);
+  const pollRoundCounterRef = useRef(0);
+
+  /** Last metrics merged from live RX + poll (keeps UI in sync with delimiter-delimited ELM lines). */
+  const latestSnapshotRef = useRef<EcMetricSnapshot>({ ...ZERO_METRICS });
+
+  const notifyListenerRef = useRef<((fragment: string) => void) | undefined>(undefined);
+
+  const bumpLatencySample = useCallback((ms: number) => {
+    latencySamplesRef.current.push(ms);
+    if (latencySamplesRef.current.length > 16) latencySamplesRef.current.shift();
+    const sum = latencySamplesRef.current.reduce((a, x) => a + x, 0);
+    const avg = sum / latencySamplesRef.current.length;
+    setLatencyMsDisplay(String(Math.max(1, Math.round(avg))));
+  }, []);
+
+  const pushZeroMetrics = useCallback(() => {
+    latencySamplesRef.current = [];
+    battCarryRef.current = 0;
+    pollRoundCounterRef.current = 0;
+    latestSnapshotRef.current = { ...ZERO_METRICS };
+    setLatencyMsDisplay('—');
+    onMetricsRef.current?.(ZERO_METRICS);
+  }, []);
+
+  const fail = useCallback((title: string, message: string, err?: Error | unknown) => {
+    log(`${title}: ${message}`);
+    if (err !== undefined) {
+      logBleException(onLogRef.current, err);
+    }
+    const detail = err instanceof Error ? err.message : err ? String(err) : '';
+    setDeviceName('Not connected');
+    setMacAddress('—');
+    setLastBleError(detail ? `${message}: ${detail}` : message);
+    setPhase('error');
+    onErrorRef.current?.(title, detail ? `${message}\n(${detail.slice(0, 220)})` : message);
+  }, [log]);
+
+  const clearResponseWait = useCallback(() => {
+    if (respTimerRef.current) {
+      clearTimeout(respTimerRef.current);
+      respTimerRef.current = null;
+    }
+    const p = pendingRef.current;
+    pendingRef.current = null;
+    if (p) p.reject(new Error('Cancelled'));
+  }, []);
+
+  const stopPollingTimers = useCallback(() => {
+    pollActiveRef.current = false;
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }, []);
+
+  const removeClassicSubscriptionsSafe = useCallback(() => {
+    dataRecvSubRef.current?.remove();
+    dataRecvSubRef.current = null;
+    moduleDiscSubRef.current?.remove();
+    moduleDiscSubRef.current = null;
+    moduleErrorSubRef.current?.remove();
+    moduleErrorSubRef.current = null;
+  }, []);
+
+  const resetTransportState = useCallback(() => {
+    stopPollingTimers();
+    clearResponseWait();
+    removeClassicSubscriptionsSafe();
+    rxAccumRef.current = '';
+  }, [clearResponseWait, removeClassicSubscriptionsSafe, stopPollingTimers]);
+
+  const disconnectHardware = useCallback(async () => {
+    const d = deviceRef.current;
+    deviceRef.current = null;
+    if (d) {
+      await d.disconnect().catch(() => undefined);
+    }
+  }, []);
+
+  const disconnectCb = useCallback(async () => {
+    log('Disconnect requested by user.');
+    connectionEpochRef.current += 1;
+    resetTransportState();
+    await disconnectHardware();
+    pushZeroMetrics();
+    setPhase('idle');
+    setDeviceName('Not connected');
+    setMacAddress('—');
+    log('Disconnected (local).');
+  }, [disconnectHardware, log, pushZeroMetrics, resetTransportState]);
+
+  const tryTakeOneResponse = useCallback((): boolean => {
+    let buf = rxAccumRef.current;
+    const termOrder = ['\r\r>', '\r\n>', '\n\r>', '\r>'];
+    for (const term of termOrder) {
+      const idx = buf.indexOf(term);
+      if (idx === -1) continue;
+      const body = buf.slice(0, idx);
+      buf = buf.slice(idx + term.length);
+      rxAccumRef.current = buf;
+      const p = pendingRef.current;
+      pendingRef.current = null;
+      if (respTimerRef.current) {
+        clearTimeout(respTimerRef.current);
+        respTimerRef.current = null;
+      }
+      if (p) p.resolve(body);
+      return true;
+    }
+    return false;
+  }, []);
+
+  const drainRxWhileTerms = useCallback(() => {
+    while (tryTakeOneResponse()) {
+      /* drain */
+    }
+  }, [tryTakeOneResponse]);
+
+  notifyListenerRef.current = (fragment: string) => {
+    try {
+      rxAccumRef.current += fragment;
+      drainRxWhileTerms();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const writeCmd = useCallback(async (dev: BluetoothDevice, cmd: string) => {
+    const ok = await dev.write(cmd, 'ascii');
+    if (!ok) throw new Error('RFCOMM write returned false');
+  }, []);
+
+  const elmExchange = useCallback(
+    async (cmd: string, timeoutMs = RESP_TIMEOUT_MS): Promise<string> => {
+      const dev = deviceRef.current;
+      if (!dev) throw new Error('No connected Bluetooth device');
+
+      if (pendingRef.current) throw new Error('ELM overlap');
+
+      const def = createDeferredString();
+      pendingRef.current = def;
+
+      respTimerRef.current = setTimeout(() => {
+        if (pendingRef.current === def) {
+          pendingRef.current = null;
+          def.reject(new Error('ELM response timeout'));
+        }
+        if (respTimerRef.current) {
+          clearTimeout(respTimerRef.current);
+          respTimerRef.current = null;
+        }
+      }, timeoutMs);
+
+      const tSend = Date.now();
+      await writeCmd(dev, cmd);
+
+      try {
+        const raw = await def.promise;
+        bumpLatencySample(Date.now() - tSend);
+        return raw;
+      } finally {
+        if (pendingRef.current === def) {
+          pendingRef.current = null;
+        }
+        if (respTimerRef.current) {
+          clearTimeout(respTimerRef.current);
+          respTimerRef.current = null;
+        }
+      }
+    },
+    [bumpLatencySample, writeCmd]
+  );
+
+  const runElmHandshakeSequence = useCallback(
+    async (dev: BluetoothDevice) => {
+      log('ELM handshake: TX AT Z (chip reset)');
+      await writeCmd(dev, 'AT Z\r');
+      await delay(1000);
+      log('ELM handshake: TX ATE0 (echo off)');
+      await writeCmd(dev, 'ATE0\r');
+      await delay(500);
+      log('ELM handshake: TX ATL0 (linefeeds off)');
+      await writeCmd(dev, 'ATL0\r');
+      await delay(500);
+      log('ELM handshake: TX AT ST FF (max response timeout)');
+      await writeCmd(dev, 'AT ST FF\r');
+      await delay(500);
+      log('TX: AT SP 7');
+      await writeCmd(dev, 'AT SP 7\r');
+      await delay(500);
+      log('TX: 0100');
+      await writeCmd(dev, '0100\r');
+      await delay(1000);
+      log('ELM handshake: Protocol 7 (CAN 29/500) fast boot complete — PID loop may run');
+    },
+    [log, writeCmd]
+  );
+
+  const attachDataPipe = useCallback(
+    (conn: BluetoothDevice) => {
+      log(`RFCOMM Rx listener on ${conn.address} (delimiter \\r reconstructed in buffer)`);
+      dataRecvSubRef.current?.remove();
+      dataRecvSubRef.current = conn.onDataReceived((ev) => {
+        const chunk = ev.data ?? '';
+        const forUi = chunk.replace(/\r/g, '').replace(/\n/g, '').replace(/>/g, '').trim();
+        if (forUi.length > 0) {
+          onLogRef.current?.(`RX: ${forUi}`);
+        }
+
+        const decoded = decodeElmResponse(forUi);
+        if (decoded) {
+          const m = { ...latestSnapshotRef.current };
+          switch (decoded.pid) {
+            case '0C':
+              m.rpm = decoded.value;
+              break;
+            case '05':
+              m.coolant = decoded.value;
+              break;
+            case '0F':
+              m.intake = decoded.value;
+              break;
+            case '11':
+              m.tps = decoded.value;
+              break;
+            case '0D':
+              m.ecuSpeed = decoded.value;
+              break;
+            default:
+              break;
+          }
+          latestSnapshotRef.current = m;
+          onMetricsRef.current?.(m);
+        }
+
+        if (/V/i.test(chunk) && /\d/.test(chunk)) {
+          const volts = parseVoltage(chunk);
+          if (volts > 0 && volts <= 30) {
+            const m = {
+              ...latestSnapshotRef.current,
+              batt: volts,
+            };
+            latestSnapshotRef.current = m;
+            battCarryRef.current = volts;
+            onMetricsRef.current?.(m);
+          }
+        }
+
+        if (chunk.length > 0) {
+          notifyListenerRef.current?.(`${chunk}\r`);
+        }
+      });
+    },
+    [log]
+  );
+
+  const attachModuleListeners = useCallback(
+    (conn: BluetoothDevice) => {
+      moduleDiscSubRef.current?.remove();
+      moduleDiscSubRef.current = RNBluetoothClassic.onDeviceDisconnected((ev) => {
+        const addr = ev.device?.address;
+        if (!addr || !deviceRef.current) return;
+        if (!sameBtAddr(addr, conn.address)) return;
+        log(`Device disconnected (native event) address=${addr}`);
+        resetTransportState();
+        deviceRef.current = null;
+        pushZeroMetrics();
+        setPhase('idle');
+        setDeviceName('Not connected');
+        setMacAddress('—');
+      });
+
+      moduleErrorSubRef.current?.remove();
+      moduleErrorSubRef.current = RNBluetoothClassic.onError((ev) => {
+        log(`RNBluetoothClassic onError: ${JSON.stringify(ev)}`);
+      });
+    },
+    [log, pushZeroMetrics, resetTransportState]
+  );
+
+  const elmExchangeSafeRef = useRef(elmExchange);
+  elmExchangeSafeRef.current = elmExchange;
+
+  const scheduleNextPollRef = useRef<() => void>(() => {});
+
+  const runPollRoundRef = useRef<() => Promise<void>>(async () => {});
+
+  scheduleNextPollRef.current = () => {
+    if (!pollActiveRef.current) return;
+    pollTimerRef.current = setTimeout(() => void runPollRoundRef.current(), POLL_GAP_MS);
+  };
+
+  runPollRoundRef.current = async () => {
+    if (!pollActiveRef.current || !deviceRef.current) return;
+
+    const m: EcMetricSnapshot = { ...latestSnapshotRef.current };
+
+    const ex = elmExchangeSafeRef.current;
+
+    try {
+      m.rpm = parseEngineRpm(obdSnippetForParser(await ex(`010C\r`)));
+      m.ecuSpeed = parseVehicleSpeed(obdSnippetForParser(await ex(`010D\r`)));
+      m.coolant = parseCoolantTemp(obdSnippetForParser(await ex(`0105\r`)));
+      m.intake = parseIntakeAirTemp(obdSnippetForParser(await ex(`010F\r`)));
+      m.tps = parseThrottlePosition(obdSnippetForParser(await ex(`0111\r`)));
+
+      pollRoundCounterRef.current += 1;
+      if (pollRoundCounterRef.current % 6 === 0 || battCarryRef.current <= 0) {
+        const rv = await ex(`AT RV\r`);
+        const volts = parseVoltage(rv);
+        log(`Decoded V: ${volts}`);
+        if (volts > 0) battCarryRef.current = volts;
+      }
+      m.batt = battCarryRef.current > 0 ? battCarryRef.current : latestSnapshotRef.current.batt;
+
+      latestSnapshotRef.current = { ...m };
+      if (pollActiveRef.current) {
+        onMetricsRef.current?.(m);
+      }
+    } catch {
+      /** skip partial round */
+    }
+
+    if (pollActiveRef.current) {
+      scheduleNextPollRef.current();
+    }
+  };
+
+  const connectToObdInner = useCallback(async () => {
+    if (phaseRef.current === 'scanning' || phaseRef.current === 'connected') return;
+
+    connectionEpochRef.current += 1;
+    const token = connectionEpochRef.current;
+
+    const stillValid = (): boolean => connectionEpochRef.current === token;
+
+    setLastBleError(null);
+    battCarryRef.current = 0;
+    pollRoundCounterRef.current = 0;
+
+    resetTransportState();
+    await disconnectHardware();
+
+    if (!stillValid()) {
+      log('connectToObd aborted before start (cancel).');
+      return;
+    }
+
+    setPhase('scanning');
+    setDeviceName('Resolving paired device…');
+    setMacAddress('—');
+
+    if (Platform.OS === 'web') {
+      fail('Bluetooth Classic', 'SPP/OBD adapters are not available on web.', undefined);
+      pushZeroMetrics();
+      return;
+    }
+
+    if (!NativeModules.RNBluetoothClassic) {
+      log('NativeModules.RNBluetoothClassic is undefined — rebuild Dev Client native app.');
+      fail(
+        'Native module missing',
+        'Bluetooth Classic native module unavailable. Run a Dev Client native build.',
+        undefined
+      );
+      pushZeroMetrics();
+      return;
+    }
+
+    log('===== connectToObd(): Bluetooth Classic (RFCOMM / SPP) =====');
+    log('connectToObd step: requesting Android Bluetooth runtime permissions …');
+
+    const permitted = await requestBluetoothPermissions(log);
+    if (!permitted) {
+      log('Permission denied');
+      pushZeroMetrics();
+      fail(
+        'Permissions',
+        'Bluetooth permissions were denied. Grant Nearby devices / Bluetooth + location if prompted.',
+        undefined
+      );
+      return;
+    }
+
+    log('connectToObd step: runtime permissions satisfied — proceeding');
+
+    try {
+      const okAvail = await RNBluetoothClassic.isBluetoothAvailable();
+      log(`connectToObd step: isBluetoothAvailable() → ${JSON.stringify(okAvail)}`);
+      if (!okAvail) {
+        fail('Bluetooth', 'Bluetooth is not available on this device.', undefined);
+        pushZeroMetrics();
+        return;
+      }
+
+      const okOn = await RNBluetoothClassic.isBluetoothEnabled();
+      log(`connectToObd step: isBluetoothEnabled() → ${JSON.stringify(okOn)}`);
+      if (!okOn) {
+        fail('Bluetooth', 'Bluetooth must be powered on.', undefined);
+        pushZeroMetrics();
+        return;
+      }
+
+      if (!stillValid()) {
+        log('connectToObd invalidated after Bluetooth state check.');
+        return;
+      }
+
+      log('Fetching paired devices...');
+      let bonded: BluetoothDevice[];
+      try {
+        bonded = await RNBluetoothClassic.getBondedDevices();
+      } catch (e) {
+        log(`connectToObd step: getBondedDevices() threw — ${JSON.stringify(e)}`);
+        logBleException(onLogRef.current, e);
+        fail('Bonded devices', 'getBondedDevices() failed.', e);
+        pushZeroMetrics();
+        return;
+      }
+
+      log(`connectToObd step: getBondedDevices returned ${bonded.length} paired device(s).`);
+
+      bonded.forEach((dev, idx) => {
+        const snapshot = {
+          index: idx,
+          id: dev.id,
+          address: dev.address,
+          name: dev.name ?? null,
+          bonded: dev.bonded,
+          type: dev.type,
+          deviceClass: dev.deviceClass,
+        };
+        log(`connectToObd step: bonded row #${idx} → ${JSON.stringify(snapshot)}`);
+      });
+
+      const picked =
+        bonded.find((d) => isObdClassicName(d.name)) ??
+        bonded.find((d) => isObdClassicName(d.address));
+
+      if (!picked || !stillValid()) {
+        if (!picked) {
+          fail(
+            'No OBD adapter',
+            'No paired dongle matched (name must include "Vlink" or "OBD"). Pair Android-Vlink in system settings first.',
+            undefined
+          );
+        }
+        pushZeroMetrics();
+        return;
+      }
+
+      log(
+        `connectToObd step: matched adapter name="${picked.name ?? ''}" address=${picked.address} id=${picked.id}`
+      );
+
+      let conn = picked;
+
+      log('Connecting to SPP...');
+      log(`device.connect(${JSON.stringify({ delimiter: '\r' })}) …`);
+
+      try {
+        const connectedOk = await conn.connect({ delimiter: '\r' });
+
+        log(`connectToObd step: device.connect settled — ok=${JSON.stringify(connectedOk)}`);
+        if (!connectedOk) {
+          const errMsg = 'device.connect returned false (socket refused or closed)';
+          log(errMsg);
+          throw new Error(errMsg);
+        }
+      } catch (e) {
+        log(`connectToObd step: SPP connect FAILED raw → ${JSON.stringify(e)}`);
+        logBleException(onLogRef.current, e);
+        await conn.disconnect().catch(() => undefined);
+        throw e;
+      }
+
+      if (!stillValid()) {
+        log('connectToObd invalidated post-RFCOMM; closing socket.');
+        await conn.disconnect().catch(() => undefined);
+        return;
+      }
+
+      deviceRef.current = conn;
+
+      latestSnapshotRef.current = { ...ZERO_METRICS };
+
+      rxAccumRef.current = '';
+      attachDataPipe(conn);
+      attachModuleListeners(conn);
+
+      log('connectToObd step: SPP socket up — listener via device.onDataReceived()');
+
+      setDeviceName(conn.name ?? 'OBD-II');
+      setMacAddress(conn.address ?? conn.id ?? '—');
+
+      await runElmHandshakeSequence(conn);
+
+      clearResponseWait();
+      rxAccumRef.current = '';
+      log('ELM handshake: cleared RX accumulator and pending ELM waiter before live PIDs');
+
+      if (!stillValid()) {
+        log('Post-init invalidated; tearing down.');
+        resetTransportState();
+        await disconnectHardware().catch(() => undefined);
+        return;
+      }
+
+      log('connectToObd step: ELM polling loop armed (device.write PID + AT RV).');
+
+      setPhase('connected');
+
+      pollActiveRef.current = true;
+      void runPollRoundRef.current();
+    } catch (e) {
+      logBleException(onLogRef.current, e);
+      resetTransportState();
+      await disconnectHardware().catch(() => undefined);
+      pushZeroMetrics();
+      fail('Connection failed', 'Bluetooth Classic / ELM327 init failed.', e);
+      setDeviceName('Not connected');
+      setMacAddress('—');
+    }
+  }, [
+    attachDataPipe,
+    attachModuleListeners,
+    clearResponseWait,
+    disconnectHardware,
+    fail,
+    log,
+    pushZeroMetrics,
+    resetTransportState,
+    runElmHandshakeSequence,
+  ]);
+
+  const connectToObd = useCallback(() => void connectToObdInner(), [connectToObdInner]);
+
+  const cancelScan = useCallback(async () => {
+    connectionEpochRef.current += 1;
+    log('Cancel requested (invalidate in-flight RFCOMM connection attempt).');
+    resetTransportState();
+    await disconnectHardware();
+    pushZeroMetrics();
+    setPhase('idle');
+    setDeviceName('Not connected');
+    setMacAddress('—');
+  }, [disconnectHardware, log, pushZeroMetrics, resetTransportState]);
+
+  const disconnectLatestRef = useRef(disconnectCb);
+  disconnectLatestRef.current = disconnectCb;
+
+  useEffect(
+    () => () => {
+      void disconnectLatestRef.current().catch(() => undefined);
+    },
+    []
+  );
+
+  return {
+    phase,
+    deviceName,
+    macAddress,
+    latencyMsDisplay,
+    lastBleError,
+    connectToObd,
+    cancelScan,
+    disconnect: disconnectCb,
+  };
 }
 </file>
 
@@ -1162,6 +2065,139 @@ export function HapticTab(props: BottomTabBarButtonProps) {
       }}
     />
   );
+}
+</file>
+
+<file path="utils/obd2Decoder.ts">
+/**
+ * ELM327 / OBD-II response helpers (Mode 01 PID hex from ECU).
+ * Hex strings may include spaces, CR/LF, or a trailing `>` prompt.
+ */
+
+/** True when ELM/OBD replies have no usable payload (Euro5/CAN quirks, bus idle). */
+export function isElmNonDataResponse(raw: string): boolean {
+  if (raw == null || typeof raw !== 'string') return true;
+  if (raw.includes('?')) return true;
+  const u = raw.toUpperCase();
+  return (
+    u.includes('SEARCHING') ||
+    u.includes('NO DATA') ||
+    u.includes('UNABLE') ||
+    u.includes('CAN ERROR') ||
+    u.includes('BUS INIT') ||
+    u.includes('STOPPED') ||
+    u.includes('DATA ERROR') ||
+    u.includes('BUFFER FULL')
+  );
+}
+
+/**
+ * Mode 01 positive response: `41` + PID (2 hex) + data bytes.
+ * Strips spaces, `>`, CR/LF only (per ELM line routing).
+ */
+export function decodeElmResponse(rawStr: string): { pid: string; value: number } | null {
+  if (!rawStr || isElmNonDataResponse(rawStr)) return null;
+
+  const hex = rawStr.replace(/[\s>\r\n]/g, '').toUpperCase();
+
+  const idx41 = hex.indexOf('41');
+  const framed = idx41 >= 0 ? hex.slice(idx41) : hex;
+  if (!framed.startsWith('41')) return null;
+
+  if (framed.length < 6) return null;
+
+  const pid = framed.substring(2, 4);
+  const aStr = framed.substring(4, 6);
+  if (aStr.length < 2) return null;
+  const A = parseInt(aStr, 16);
+  if (!Number.isFinite(A) || A < 0 || A > 255) return null;
+
+  const bStr = framed.substring(6, 8);
+  const hasB = bStr.length >= 2;
+  let Bparsed = NaN;
+  if (hasB) Bparsed = parseInt(bStr, 16);
+
+  switch (pid) {
+    case '0C': {
+      if (!hasB || framed.length < 8) return null;
+      if (!Number.isFinite(Bparsed) || Bparsed < 0 || Bparsed > 255) return null;
+      const rpm = ((A * 256 + Bparsed) / 4) | 0;
+      if (!Number.isFinite(rpm) || rpm < 0 || rpm > 16383) return null;
+      return { pid, value: rpm };
+    }
+    case '05':
+    case '0F':
+      return { pid, value: A - 40 };
+    case '11': {
+      const pct = (A * 100) / 255;
+      if (!Number.isFinite(pct) || pct < 0 || pct > 100) return null;
+      return { pid, value: Math.round(pct * 10) / 10 };
+    }
+    case '0D':
+      return { pid, value: A };
+    default:
+      return null;
+  }
+}
+
+/** Adapter / ECU nominal voltage lines like `13.2V`, `RX: 14.1V`. */
+export function parseVoltage(rawStr: string): number {
+  if (!rawStr || typeof rawStr !== 'string') return 0;
+  const m = rawStr.match(/-?\d+\.?\d*/);
+  if (!m?.[0]) return 0;
+  const v = parseFloat(m[0]);
+  if (!Number.isFinite(v)) return 0;
+  return Math.round(v * 10) / 10;
+}
+
+/** ELM `AT RV`-style strings; alias of {@link parseVoltage}. */
+export function parseBatteryVoltage(str: string): number {
+  return parseVoltage(str);
+}
+
+function stripToHexChars(str: string): string {
+  return str.replace(/[>\sV\r\n]/gi, '').toUpperCase();
+}
+
+/** Strip ELM prompts, voltage/unit noise, ASCII whitespace; upper-case hex. */
+export function cleanHexResponse(str: string): string {
+  if (!str || typeof str !== 'string') return '';
+  return stripToHexChars(str);
+}
+
+/** PID 0x0C — Engine RPM (delegates to {@link decodeElmResponse}). */
+export function parseEngineRpm(hex: string): number {
+  if (isElmNonDataResponse(hex)) return 0;
+  const d = decodeElmResponse(hex);
+  return d?.pid === '0C' ? d.value : 0;
+}
+
+/** PID 0x0D — Vehicle speed (km/h): A */
+export function parseVehicleSpeed(hex: string): number {
+  if (isElmNonDataResponse(hex)) return 0;
+  const d = decodeElmResponse(hex);
+  return d?.pid === '0D' ? d.value : 0;
+}
+
+/** PID 0x05 — Coolant temp (°C): A - 40 */
+export function parseCoolantTemp(hex: string): number {
+  if (isElmNonDataResponse(hex)) return 0;
+  const d = decodeElmResponse(hex);
+  return d?.pid === '05' ? d.value : 0;
+}
+
+/** PID 0x0F — Intake air temp (°C): A - 40 */
+export function parseIntakeAirTemp(hex: string): number {
+  if (isElmNonDataResponse(hex)) return 0;
+  const d = decodeElmResponse(hex);
+  return d?.pid === '0F' ? d.value : 0;
+}
+
+/** PID 0x11 — Throttle position (%) */
+export function parseThrottlePosition(hex: string): number {
+  if (isElmNonDataResponse(hex)) return 0;
+  const d = decodeElmResponse(hex);
+  return d?.pid === '11' ? d.value : 0;
 }
 </file>
 
@@ -1937,54 +2973,6 @@ const styles = StyleSheet.create({
 });
 </file>
 
-<file path="components/ui/icon-symbol.tsx">
-// Fallback for using MaterialIcons on Android and web.
-
-import MaterialIcons from '@expo/vector-icons/MaterialIcons';
-import { SymbolWeight, SymbolViewProps } from 'expo-symbols';
-import { ComponentProps } from 'react';
-import { OpaqueColorValue, type StyleProp, type TextStyle } from 'react-native';
-
-type MaterialIconName = ComponentProps<typeof MaterialIcons>['name'];
-
-/**
- * Add your SF Symbols to Material Icons mappings here.
- * - see Material Icons in the [Icons Directory](https://icons.expo.fyi).
- * - see SF Symbols in the [SF Symbols](https://developer.apple.com/sf-symbols/) app.
- */
-const MAPPING = {
-  'house.fill': 'home',
-  'paperplane.fill': 'send',
-  'chevron.left.forwardslash.chevron.right': 'code',
-  'chevron.right': 'chevron-right',
-  'waveform.path.ecg': 'multiline-chart',
-  'stopwatch.fill': 'timer',
-  'bolt.fill': 'flash-on',
-} as const satisfies Partial<Record<SymbolViewProps['name'], MaterialIconName>>;
-
-type IconSymbolName = keyof typeof MAPPING;
-
-/**
- * An icon component that uses native SF Symbols on iOS, and Material Icons on Android and web.
- * This ensures a consistent look across platforms, and optimal resource usage.
- * Icon `name`s are based on SF Symbols and require manual mapping to Material Icons.
- */
-export function IconSymbol({
-  name,
-  size = 24,
-  color,
-  style,
-}: {
-  name: IconSymbolName;
-  size?: number;
-  color: string | OpaqueColorValue;
-  style?: StyleProp<TextStyle>;
-  weight?: SymbolWeight;
-}) {
-  return <MaterialIcons color={color} size={size} name={MAPPING[name]} style={style} />;
-}
-</file>
-
 <file path="components/telemetry/oscilloscope/hooks/useOscilloscopeCalibration.ts">
 import { useCallback } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
@@ -2569,6 +3557,54 @@ export function applyPresetConfig(cfg: PresetConfig, targets: TelemetryPresetTar
   targets.stableHoldMs.value = cfg.stableHoldMs;
   targets.harshPeakG.value = cfg.harshPeakG;
   targets.overdampedSettlingMs.value = cfg.overdampedSettlingMs;
+}
+</file>
+
+<file path="components/ui/icon-symbol.tsx">
+// Fallback for using MaterialIcons on Android and web.
+
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { SymbolWeight, SymbolViewProps } from 'expo-symbols';
+import { ComponentProps } from 'react';
+import { OpaqueColorValue, type StyleProp, type TextStyle } from 'react-native';
+
+type MaterialIconName = ComponentProps<typeof MaterialIcons>['name'];
+
+/**
+ * Add your SF Symbols to Material Icons mappings here.
+ * - see Material Icons in the [Icons Directory](https://icons.expo.fyi).
+ * - see SF Symbols in the [SF Symbols](https://developer.apple.com/sf-symbols/) app.
+ */
+const MAPPING = {
+  'house.fill': 'home',
+  'paperplane.fill': 'send',
+  'chevron.left.forwardslash.chevron.right': 'code',
+  'chevron.right': 'chevron-right',
+  'waveform.path.ecg': 'multiline-chart',
+  'stopwatch.fill': 'timer',
+  'bolt.fill': 'flash-on',
+} as const satisfies Partial<Record<SymbolViewProps['name'], MaterialIconName>>;
+
+type IconSymbolName = keyof typeof MAPPING;
+
+/**
+ * An icon component that uses native SF Symbols on iOS, and Material Icons on Android and web.
+ * This ensures a consistent look across platforms, and optimal resource usage.
+ * Icon `name`s are based on SF Symbols and require manual mapping to Material Icons.
+ */
+export function IconSymbol({
+  name,
+  size = 24,
+  color,
+  style,
+}: {
+  name: IconSymbolName;
+  size?: number;
+  color: string | OpaqueColorValue;
+  style?: StyleProp<TextStyle>;
+  weight?: SymbolWeight;
+}) {
+  return <MaterialIcons color={color} size={size} name={MAPPING[name]} style={style} />;
 }
 </file>
 
@@ -3914,6 +4950,14 @@ export const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 0 },
     elevation: 14,
   },
+  ecuConnectBtnError: {
+    borderColor: '#ff6b82',
+    shadowColor: '#ff6b82',
+    shadowOpacity: 0.4,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 8,
+  },
   ecuConnectGlow: {
     ...StyleSheet.absoluteFillObject,
     borderRadius: 8,
@@ -3934,6 +4978,9 @@ export const styles = StyleSheet.create({
   },
   ecuConnectLabelConnected: {
     color: '#9effc5',
+  },
+  ecuConnectLabelError: {
+    color: '#ffb3bf',
   },
   ecuInfoRow: {
     flexDirection: 'row',

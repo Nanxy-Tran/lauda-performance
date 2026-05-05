@@ -52,6 +52,13 @@ export default function EcuDashboard() {
 
   const [disp, setDisp] = useState<HudStrings>(() => snapshotToHudStrings(ZERO_SNAPSHOT));
 
+  const [logs, setLogs] = useState<string[]>([]);
+
+  const appendLog = useCallback((msg: string) => {
+    const time = new Date().toISOString().substring(11, 19);
+    setLogs((prev) => [...prev, `[${time}] ${msg}`].slice(-50));
+  }, []);
+
   const flushHudFromSv = useCallback(
     (r: number, c: number, i: number, t: number, b: number, s: number) => {
       setDisp({
@@ -113,11 +120,19 @@ export default function EcuDashboard() {
     [battSv, coolantSv, intakeSv, rpmSv, speedSv, tpsSv]
   );
 
-  const { phase, deviceName, macAddress, latencyMsDisplay, connect, cancelScan, disconnect } =
-    useObd2Bluetooth({
-      onMetrics: applyMetricsFromBle,
-      onError: onBleError,
-    });
+  const {
+    phase,
+    deviceName,
+    macAddress,
+    latencyMsDisplay,
+    connectToObd,
+    cancelScan,
+    disconnect,
+  } = useObd2Bluetooth({
+    onMetrics: applyMetricsFromBle,
+    onError: onBleError,
+    onLog: appendLog,
+  });
 
   const latencyLabel =
     latencyMsDisplay === '—' ? '—' : `${latencyMsDisplay} ms`;
@@ -126,17 +141,26 @@ export default function EcuDashboard() {
     phase === 'connected'
       ? 'DISCONNECT'
       : phase === 'scanning'
-        ? 'CANCEL SCAN'
+        ? 'CANCEL'
         : phase === 'error'
           ? 'RETRY CONNECT'
           : 'OBD CONNECT';
 
   const onPrimaryPress =
     phase === 'connected'
-      ? () => void disconnect()
+      ? () => {
+          appendLog('UI: disconnect requested');
+          void disconnect();
+        }
       : phase === 'scanning'
-        ? () => void cancelScan()
-        : () => connect();
+        ? () => {
+            appendLog('UI: cancel in-flight connection');
+            void cancelScan();
+          }
+        : () => {
+            appendLog('UI: connectToObd requested from dashboard');
+            connectToObd();
+          };
 
   return (
     <ScrollView
@@ -155,10 +179,10 @@ export default function EcuDashboard() {
             phase === 'connected'
               ? 'Disconnect OBD adapter'
               : phase === 'scanning'
-                ? 'Cancel Bluetooth scan'
+                ? 'Cancel connection attempt'
                 : phase === 'error'
                   ? 'Retry connecting to OBD adapter'
-                  : 'Scan and connect OBD adapter'
+                  : 'Connect to paired OBD adapter'
           }
           onPress={onPrimaryPress}
           style={({ pressed }) => [
@@ -221,8 +245,43 @@ export default function EcuDashboard() {
       </View>
 
       <Text style={[styles.performanceHint, { fontFamily: mono, marginTop: 10 }]}>
-        ELM327 over BLE · ignition on · decoded values arrive only while the ECU link is alive.
+        ELM327 over Bluetooth Classic (SPP)—pair dongle (e.g. Android-Vlink) in system settings first ·
+        ignition on · values require a live adapter + ECU.
       </Text>
+
+      <View style={[styles.hudSection, { marginTop: 16}]}>
+        <Text style={[styles.hudSectionLabel, { fontFamily: mono }]}>OBD TERMINAL</Text>
+        <View
+          style={{
+            height: 300,
+            backgroundColor: '#000000',
+            borderWidth: 1,
+            borderColor: '#1c2f24',
+            padding: 8,
+          }}
+        >
+          <ScrollView
+            nestedScrollEnabled
+            style={{ flex: 1 }}
+            contentContainerStyle={{ flexGrow: 1, paddingBottom: 4 }}
+            keyboardShouldPersistTaps="handled"
+          >
+            {logs.map((line, i) => (
+              <Text
+                key={`log-${i}`}
+                style={{
+                  fontFamily: mono,
+                  fontSize: 9,
+                  color: '#2cff8a',
+                }}
+                selectable
+              >
+                {line}
+              </Text>
+            ))}
+          </ScrollView>
+        </View>
+      </View>
     </ScrollView>
   );
 }
